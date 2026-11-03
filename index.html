@@ -70,10 +70,11 @@
     background: #d32f2f; border: 0; color: #fff; font-size: 22px; letter-spacing: 1px; min-height: 66px;
     border-radius: 16px; box-shadow: 0 6px 24px rgba(211,47,47,.45); }
   .hint { color: var(--muted); font-size: 12px; margin: 6px 2px 0; }
-  .views { display: flex; gap: 8px; align-items: flex-start; }
-  #cvTop { flex: 1; min-width: 0; height: 300px; }
-  #cvSide { width: 78px; flex: none; }
-  canvas.view { display: block; background: #0b0d10; border-radius: 12px; touch-action: none; }
+  #cvTop, #cvSide { width: 100%; height: 300px; }
+  canvas.view { display: block; background: #0A0C0F; border-radius: 12px; touch-action: none; }
+  .seg { display: flex; gap: 0; margin-bottom: 8px; background: #0d1014; border: 1px solid var(--line); border-radius: 12px; padding: 3px; }
+  .seg button { flex: 1; min-height: 40px; border: 0; background: transparent; color: var(--muted); border-radius: 9px; padding: 6px 4px; font-size: 15px; }
+  .seg button.on { background: #35C8DC; color: #062027; }
   .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
   .toolbar button { min-height: 36px; padding: 6px 10px; font-size: 13px; }
   .toolbar button.on { background: #1f3b2c; border-color: #2c6b48; color: #7fe0a9; }
@@ -118,14 +119,18 @@
 
 <!-- BRAZO: mover el robot arrastrando su dibujo -->
 <div id="tBrazo" class="tab active card">
+  <div id="modos" class="seg">
+    <button data-modo="pinza">Pinza</button>
+    <button data-modo="prox">Proximal</button>
+    <button data-modo="dist">Distal</button>
+  </div>
   <div class="toolbar">
     <button id="btnCoords">Coordenadas</button>
-    <span class="hint" style="margin:0;flex:1">Arrastra la <b>pinza</b>, un <b>brazo</b> o la <b>Z</b> (derecha). Al soltar, el robot va.</span>
+    <span class="hint" style="margin:0;flex:1">Elige qué mover y arrastra el dedo en cualquier parte del dibujo. Al soltar, el robot va.</span>
   </div>
-  <div class="views">
-    <canvas id="cvTop" class="view"></canvas>
-    <canvas id="cvSide" class="view"></canvas>
-  </div>
+  <canvas id="cvTop" class="view"></canvas>
+  <p class="hint" style="margin:10px 2px 6px">Altura Z: arrastra arriba / abajo en la vista lateral.</p>
+  <canvas id="cvSide" class="view"></canvas>
   <div id="target"></div>
 </div>
 
@@ -357,7 +362,10 @@ function onLine(line) {
   m = line.match(/Pinza: x=(-?[\d.]+) y=(-?[\d.]+) mm/);
   if (m) { $("rX").textContent = (+m[1]).toFixed(1); $("rY").textContent = (+m[2]).toFixed(1); }
   m = line.match(/Servos: muneca=(\d+) pinza=(\d+)/);
-  if (m) { $("rServos").textContent = `${m[1]} / ${m[2]}`; syncSlider("sMun", "vMun", +m[1]); syncSlider("sPin", "vPin", +m[2]); }
+  if (m) { $("rServos").textContent = `${m[1]} / ${m[2]}`; syncSlider("sMun", "vMun", +m[1]); syncSlider("sPin", "vPin", +m[2]);
+           servos.mun = +m[1]; servos.pin = +m[2]; drawAll(); }
+  m = line.match(/^Muneca en (\d+)/); if (m) { servos.mun = +m[1]; drawAll(); }
+  m = line.match(/^Pinza en (\d+)/); if (m) { servos.pin = +m[1]; drawAll(); }
   m = line.match(/X: \S+, pos=-?\d+ \((homeado|sin homear)\)\s+Y: \S+, pos=-?\d+ \((homeado|sin homear)\)\s+Z: \S+, pos=-?\d+ \((homeado|sin homear)\)/);
   if (m) { homed = m[1] === "homeado" && m[2] === "homeado" && m[3] === "homeado"; refreshUi(); }
 
@@ -429,7 +437,7 @@ const RAD = Math.PI / 180;
 
 const robot = { a1: 0, a2: 0, z: 0, known: false };  // última pose real que reportó el robot
 let ghost = null;   // pose que se está arrastrando: {a1, a2, z, valid}
-let drag = null;    // {mode: "tip" | "prox" | "dist" | "z", startA2}
+let drag = null;    // arrastre en curso: {mode: "pinza" | "prox" | "dist" | "z", ...}
 let showCoords = true;
 try { showCoords = localStorage.getItem("scaraCoords") !== "0"; } catch (e) {}
 
@@ -461,10 +469,45 @@ function ik(x, y) {
 
 // ---------- vista superior: x = frente (arriba en la pantalla), y = izquierda ----------
 const cvTop = $("cvTop"), cvSide = $("cvSide");
+
+// Colores y formas: los mismos del dibujo de la interfaz de la compu (arm_canvas.py / arm_side_canvas.py)
+const C = {
+  canvas: "#0A0C0F", grid: "#1B222C", border: "#232C38", borderHi: "#2C3746", textLo: "#8A97A8",
+  body: "#6B7280", bodyHi: "#9CA3AF", bodyLo: "#454B56", black: "#191D23", outline: "#0D1014",
+  silverHi: "#EEF3F8", silver: "#C4CDD8", silverDk: "#8E99A6", screw: "#59626E", slot: "#3A424E",
+  servo: "#4A7BE0", servoHi: "#6E99F0", servoDk: "#2B4A94", accent: "#35C8DC", danger: "#F04A46",
+};
+const U = 0.75;                                  // mm por unidad de dibujo
+const L1U = L1 / U, L2U = L2 / U;                // largo de los eslabones en unidades de dibujo
+const servos = { mun: 90, pin: 90 };             // último valor de los servos que reportó el robot
+
+// Qué se mueve al arrastrar (lo elige el usuario con los botones de arriba)
+let modo = "pinza";
+try { modo = localStorage.getItem("scaraModo") || "pinza"; } catch (e) {}
+
+function munecaRel() { return servos.mun - 90; }                                   // 90 = recta
+function pinzaAbierta() { return Math.max(0, Math.min(1, (150 - servos.pin) / 150)); } // 0 cerrada .. 1 abierta
+
+function rr(ctx, x, y, w, h, r) {                // rectángulo redondeado (sin depender de ctx.roundRect)
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y); ctx.closePath();
+}
+function circ(ctx, x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); }
+function puntos(ctx, w, h, paso) {               // fondo de puntitos como en la compu
+  if (!(paso >= 5)) return;                      // (evita un ciclo infinito si el lienzo aún no tiene tamaño)
+  ctx.fillStyle = C.grid;
+  for (let y = paso / 2; y < h; y += paso) for (let x = paso / 2; x < w; x += paso) ctx.fillRect(x - 1, y - 1, 2, 2);
+}
+
+// ---------- vista superior: x = frente (arriba en la pantalla), y = izquierda ----------
 function topFrame() {
   const w = cvTop.clientWidth, h = cvTop.clientHeight;
-  const s = Math.min(w / 2, h * 0.6) / 212;                // px por mm
-  return { w, h, s, cx: w / 2, cy: h * 0.6 };
+  const cy = h * 0.62;
+  const s = Math.min(w / 2, cy) / 240;           // px por mm (deja lugar para la pinza)
+  return { w, h, s, cx: w / 2, cy };
 }
 function toScreen(f, x, y) { return [f.cx - y * f.s, f.cy - x * f.s]; }
 function toWorld(f, sx, sy) { return [(f.cy - sy) / f.s, (f.cx - sx) / f.s]; }
@@ -477,30 +520,27 @@ function prepCanvas(cv) {
   }
   const ctx = cv.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = C.canvas; ctx.fillRect(0, 0, w, h);
   return ctx;
 }
 
 function drawCoords(ctx, f) {
   ctx.save();
-  // cuadrícula cada 25 mm
-  ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 1;
-  for (let m = -250; m <= 250; m += 25) {
-    let [ax, ay] = toScreen(f, m, -250), [bx, by] = toScreen(f, m, 250);
+  ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 1;          // cuadrícula cada 25 mm
+  for (let m = -275; m <= 275; m += 25) {
+    let [ax, ay] = toScreen(f, m, -275), [bx, by] = toScreen(f, m, 275);
     ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
-    [ax, ay] = toScreen(f, -250, m); [bx, by] = toScreen(f, 250, m);
+    [ax, ay] = toScreen(f, -275, m); [bx, by] = toScreen(f, 275, m);
     ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
   }
-  // ejes
-  ctx.strokeStyle = "rgba(255,197,49,0.55)"; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(f.cx, f.h); ctx.lineTo(f.cx, 6); ctx.stroke();        // eje x
-  ctx.beginPath(); ctx.moveTo(f.w - 4, f.cy); ctx.lineTo(4, f.cy); ctx.stroke();    // eje y
-  ctx.fillStyle = "rgba(255,197,49,0.9)"; ctx.font = "600 11px -apple-system, sans-serif";
+  ctx.strokeStyle = "rgba(53,200,220,0.55)"; ctx.lineWidth = 1.5;         // ejes
+  ctx.beginPath(); ctx.moveTo(f.cx, f.h); ctx.lineTo(f.cx, 6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(f.w - 4, f.cy); ctx.lineTo(4, f.cy); ctx.stroke();
+  ctx.fillStyle = "rgba(111,227,242,0.95)"; ctx.font = "600 11px -apple-system, sans-serif";
   ctx.fillText("x (frente)", f.cx + 5, 14);
   ctx.fillText("y (izq.)", 6, f.cy - 6);
-  // marcas cada 50 mm
-  ctx.fillStyle = "rgba(255,255,255,0.45)"; ctx.font = "10px ui-monospace, Menlo, monospace";
-  for (let m = 50; m <= 200; m += 50) {
+  ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = "10px ui-monospace, Menlo, monospace";
+  for (let m = 50; m <= 200; m += 50) {                                    // marcas cada 50 mm
     let [sx, sy] = toScreen(f, m, 0);
     if (sy > 18) { ctx.fillText(m, sx + 4, sy + 3); ctx.fillRect(sx - 3, sy, 6, 1); }
     [sx, sy] = toScreen(f, -m, 0);
@@ -510,94 +550,245 @@ function drawCoords(ctx, f) {
     [sx, sy] = toScreen(f, 0, -m);
     if (sx < f.w - 10) { ctx.fillText(-m, sx - 10, sy + 13); ctx.fillRect(sx, sy - 3, 1, 6); }
   }
-  // alcance máximo y mínimo
-  ctx.setLineDash([4, 5]); ctx.strokeStyle = "rgba(74,163,255,0.35)"; ctx.lineWidth = 1;
-  [L1 + L2, L2 - L1].forEach(r => { ctx.beginPath(); ctx.arc(f.cx, f.cy, r * f.s, 0, 2 * Math.PI); ctx.stroke(); });
+  ctx.restore();
+}
+function drawReach(ctx, f) {                     // círculos de alcance máximo y mínimo
+  ctx.save(); ctx.lineWidth = 1.2;
+  ctx.setLineDash([3, 7]); ctx.strokeStyle = C.borderHi; circ(ctx, f.cx, f.cy, (L1 + L2) * f.s); ctx.stroke();
+  ctx.setLineDash([2, 8]); ctx.strokeStyle = C.grid; circ(ctx, f.cx, f.cy, (L2 - L1) * f.s); ctx.stroke();
   ctx.restore();
 }
 
-function drawArm(ctx, f, a1, a2, style) {
-  const p = fk(a1, a2);
-  const [bx, by] = [f.cx, f.cy];
-  const [ex, ey] = toScreen(f, p.ex, p.ey);
-  const [tx, ty] = toScreen(f, p.tx, p.ty);
-  ctx.save();
-  ctx.globalAlpha = style.alpha;
-  ctx.lineCap = "round";
-  ctx.strokeStyle = style.color; ctx.lineWidth = 15 * Math.min(1, f.s * 3.4);
-  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex, ey); ctx.stroke();
-  ctx.lineWidth = 11 * Math.min(1, f.s * 3.4);
-  ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(tx, ty); ctx.stroke();
-  ctx.fillStyle = "#0b0d10";
-  [[bx, by, 8], [ex, ey, 6]].forEach(([x, y, r]) => { ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fill(); });
-  // pinza (punto que se arrastra)
-  ctx.fillStyle = style.tip; ctx.beginPath(); ctx.arc(tx, ty, 9, 0, 2 * Math.PI); ctx.fill();
-  ctx.strokeStyle = "#0b0d10"; ctx.lineWidth = 2; ctx.stroke();
+// Eslabón visto desde arriba: w0 = medio ancho en la articulación, w1 = medio ancho en la punta
+function linkPath(ctx, L, w0, w1, e) {
+  ctx.beginPath();
+  ctx.moveTo(0, -w0); ctx.lineTo(L - e, -w1); ctx.quadraticCurveTo(L, -w1, L, 0);
+  ctx.quadraticCurveTo(L, w1, L - e, w1); ctx.lineTo(0, w0);
+  ctx.quadraticCurveTo(-w0, w0, -w0, 0); ctx.quadraticCurveTo(-w0, -w0, 0, -w0); ctx.closePath();
+}
+function drawLink(ctx, L, big, st) {
+  const [w0, w1, e] = big ? [26, 20, 18] : [21, 17, 15];
+  linkPath(ctx, L, w0, w1, e);
+  ctx.fillStyle = C.body; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = st.edge; ctx.stroke();
+  // brillo arriba y sombra abajo (como en la compu)
+  const [a, b, c, d, ee, inner] = big ? [19, 14, 5, 9, 20, 9] : [15, 11, 4, 8, 17, 7];
+  [[-1, C.bodyHi, 0.55], [1, C.bodyLo, 0.5]].forEach(([s, col, al]) => {
+    ctx.beginPath();
+    ctx.moveTo(4, s * a); ctx.lineTo(L - ee, s * b); ctx.quadraticCurveTo(L - d, s * b, L - d, s * c);
+    ctx.lineTo(4, s * inner); ctx.closePath();
+    ctx.globalAlpha = st.alpha * al; ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = st.alpha;
+  });
+  const r = big ? 5 : 4.4;
+  (big ? [0.29, 0.74] : [0.34, 0.72]).forEach(k => drawScrew(ctx, L * k, 0, r));
+  if (st.hl) {                                   // resaltar la pieza que se va a mover
+    linkPath(ctx, L, w0, w1, e);
+    ctx.lineWidth = 5; ctx.strokeStyle = st.hlColor; ctx.stroke();
+  }
+}
+function drawScrew(ctx, x, y, r) {
+  circ(ctx, x, y, r); ctx.fillStyle = C.screw; ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = C.outline; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x - r * 0.7, y); ctx.lineTo(x + r * 0.7, y);
+  ctx.lineWidth = 1.6; ctx.strokeStyle = C.slot; ctx.stroke();
+}
+function drawBearing(ctx, ro, rs, rm, rc, st) {
+  circ(ctx, 0, 0, ro); ctx.fillStyle = C.black; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = st.edge; ctx.stroke();
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rs);
+  g.addColorStop(0, C.silverHi); g.addColorStop(1, C.silverDk);
+  circ(ctx, 0, 0, rs); ctx.fillStyle = g; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = C.screw; ctx.stroke();
+  circ(ctx, 0, 0, rm); ctx.fillStyle = C.silverDk; ctx.fill();
+  circ(ctx, 0, 0, rc); ctx.fillStyle = C.screw; ctx.fill(); ctx.lineWidth = 0.8; ctx.strokeStyle = C.slot; ctx.stroke();
+}
+function drawBase(ctx) {
+  circ(ctx, 0, 0, 54); ctx.fillStyle = C.black; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = C.outline; ctx.stroke();
+  circ(ctx, 0, 0, 44); ctx.lineWidth = 1.5; ctx.strokeStyle = C.borderHi; ctx.stroke();
+  ctx.fillStyle = C.screw;
+  for (let i = 0; i < 6; i++) { circ(ctx, 46 * Math.cos(i * Math.PI / 3), 46 * Math.sin(i * Math.PI / 3), 3.4); ctx.fill(); }
+}
+function drawJaw(ctx, off, st) {
+  ctx.save(); ctx.translate(0, off); if (off < 0) ctx.scale(1, -1);
+  rr(ctx, 0, -11, 33, 11, 3); ctx.fillStyle = C.body; ctx.fill(); ctx.lineWidth = 2.2; ctx.strokeStyle = st.edge; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(32, -11); ctx.lineTo(47, -8.5); ctx.lineTo(47, -2.5); ctx.lineTo(32, 0); ctx.closePath();
+  ctx.fillStyle = C.black; ctx.fill(); ctx.stroke();
   ctx.restore();
-  return { bx, by, ex, ey, tx, ty, tip: p };
+}
+function drawGripper(ctx, st) {
+  rr(ctx, -15, -19, 31, 38, 5); ctx.fillStyle = C.servo; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = st.edge; ctx.stroke();
+  ctx.globalAlpha = st.alpha * 0.7; rr(ctx, -11, -15, 23, 11, 3); ctx.fillStyle = C.servoHi; ctx.fill(); ctx.globalAlpha = st.alpha;
+  ctx.fillStyle = C.servoDk; circ(ctx, -9, 13, 2.2); ctx.fill(); circ(ctx, 10, 13, 2.2); ctx.fill();
+  ctx.save();
+  ctx.rotate(-munecaRel() * RAD);                // giro de la muñeca (antihorario +)
+  const gap = 5 + pinzaAbierta() * 20;
+  drawJaw(ctx, gap, st); drawJaw(ctx, -gap, st);
+  circ(ctx, 0, 0, 9); ctx.fillStyle = C.servoDk; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = st.edge; ctx.stroke();
+  circ(ctx, 0, 0, 3.5); ctx.fillStyle = C.silver; ctx.fill();
+  ctx.restore();
+  // mira en el punto que controla el firmware (eje de la punta del distal)
+  ctx.save(); ctx.setLineDash([2, 4]); ctx.lineWidth = st.hl ? 2 : 1; ctx.strokeStyle = st.hl ? st.hlColor : C.accent;
+  circ(ctx, 0, 0, st.hl ? 22 : 16); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-26, 0); ctx.lineTo(26, 0); ctx.moveTo(0, -26); ctx.lineTo(0, 26); ctx.stroke();
+  ctx.restore();
+}
+
+// Dibuja el robot completo en la pose (a1, a2). st: {alpha, edge, hl: "pinza"|"prox"|"dist"|null, hlColor}
+function drawRobot(ctx, f, a1, a2, st) {
+  const dir = a => Math.atan2(-Math.cos(a * RAD), -Math.sin(a * RAD));   // ángulo en pantalla de un eslabón
+  const p = fk(a1, a2);
+  ctx.save();
+  ctx.globalAlpha = st.alpha;
+  ctx.translate(f.cx, f.cy); ctx.scale(f.s * U, f.s * U);
+  ctx.rotate(dir(a1));
+  drawLink(ctx, L1U, true, { ...st, hl: st.hl === "prox" });
+  drawBearing(ctx, 24, 15, 6.5, 3, st);
+  ctx.translate(L1U, 0); ctx.rotate(dir(a1 + a2) - dir(a1));          // al codo
+  drawLink(ctx, L2U, false, { ...st, hl: st.hl === "dist" });
+  drawBearing(ctx, 21, 13, 5.5, 2.6, st);
+  ctx.translate(L2U, 0);
+  drawGripper(ctx, { ...st, hl: st.hl === "pinza" });
+  ctx.restore();
+  return p;
 }
 
 function drawTop() {
   const ctx = prepCanvas(cvTop), f = topFrame();
+  puntos(ctx, f.w, f.h, 26 * f.s * U * 1.33);
   if (showCoords) drawCoords(ctx, f);
-  // base / columna
-  ctx.fillStyle = "#2a313b"; ctx.beginPath(); ctx.arc(f.cx, f.cy, 14, 0, 2 * Math.PI); ctx.fill();
+  drawReach(ctx, f);
+  ctx.save(); ctx.translate(f.cx, f.cy); ctx.scale(f.s * U, f.s * U); drawBase(ctx); ctx.restore();
   if (!robot.known) {
-    ctx.fillStyle = "#8b96a3"; ctx.font = "13px -apple-system, sans-serif"; ctx.textAlign = "center";
-    ctx.fillText(connected ? "Pide el estado (?) o haz HOME" : "Conecta el robot", f.cx, f.cy + 40);
+    ctx.fillStyle = C.textLo; ctx.font = "13px -apple-system, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(connected ? "Pide el estado (?) o haz HOME" : "Conecta el robot", f.cx, f.cy + 60);
     ctx.textAlign = "start";
     return;
   }
-  drawArm(ctx, f, robot.a1, robot.a2, { color: "#aab4c0", tip: "#ffc531", alpha: ghost ? 0.35 : 1 });
   if (ghost) {
-    const g = drawArm(ctx, f, ghost.a1, ghost.a2,
-      { color: ghost.valid ? "#ffc531" : "#ff4d4f", tip: ghost.valid ? "#ffc531" : "#ff4d4f", alpha: 0.85 });
-    if (showCoords) {   // líneas guía hasta los ejes desde la punta
-      ctx.save(); ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(255,197,49,0.6)";
-      const [ax] = toScreen(f, g.tip.tx, 0), [, ay] = toScreen(f, 0, g.tip.ty);
-      ctx.beginPath(); ctx.moveTo(g.tx, g.ty); ctx.lineTo(f.cx, g.ty); ctx.moveTo(g.tx, g.ty); ctx.lineTo(g.tx, f.cy); ctx.stroke();
+    // el robot real queda tenue atrás; el que se arrastra se dibuja completo
+    drawRobot(ctx, f, robot.a1, robot.a2, { alpha: 0.28, edge: C.outline, hl: null });
+    const bad = !ghost.valid;
+    const p = drawRobot(ctx, f, ghost.a1, ghost.a2,
+      { alpha: 1, edge: bad ? C.danger : C.outline, hl: modo, hlColor: bad ? C.danger : C.accent });
+    if (showCoords) {                            // líneas guía desde la punta hasta los ejes
+      const [tx, ty] = toScreen(f, p.tx, p.ty);
+      ctx.save(); ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(111,227,242,0.7)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(f.cx, ty); ctx.moveTo(tx, ty); ctx.lineTo(tx, f.cy); ctx.stroke();
       ctx.restore();
     }
+  } else {
+    drawRobot(ctx, f, robot.a1, robot.a2, { alpha: 1, edge: C.outline, hl: modo, hlColor: C.accent });
   }
 }
 
-// ---------- vista lateral: Z (0 = arriba, 134 = abajo) ----------
+// ---------- vista lateral (Z): columna con tornillo, carro y brazo de perfil ----------
+// Mismo dibujo que arm_side_canvas.py. Z = 0 arriba (home), 134 = lo más abajo.
+const SV_W = 420, SV_H = 500, Z_TOP_DY = -288, Z_TRAVEL = 324, ARM_Y = 384;  // ARM_Y: altura del brazo en el carro
 function sideFrame() {
   const w = cvSide.clientWidth, h = cvSide.clientHeight;
-  return { w, h, top: 22, bot: h - 22 };
+  const sc = Math.min(w / SV_W, h / SV_H);
+  return { w, h, sc, ox: (w - SV_W * sc) / 2, oy: (h - SV_H * sc) / 2 };
 }
-function zToY(f, z) { return f.top + (z / Z_MAX) * (f.bot - f.top); }
-function yToZ(f, y) { return Math.max(0, Math.min(Z_MAX, (y - f.top) / (f.bot - f.top) * Z_MAX)); }
+function zDy(z) { return Z_TOP_DY + Math.max(0, Math.min(Z_MAX, z)) / Z_MAX * Z_TRAVEL; }
+
+function drawFrame(ctx) {
+  ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.beginPath(); ctx.ellipse(146, 486, 120, 9, 0, 0, 2 * Math.PI); ctx.fill();
+  ctx.lineWidth = 2.5; ctx.strokeStyle = C.outline;
+  rr(ctx, 46, 452, 200, 30, 6); ctx.fillStyle = C.black; ctx.fill(); ctx.stroke();
+  rr(ctx, 52, 455, 188, 5, 2.5); ctx.fillStyle = C.borderHi; ctx.fill();
+  rr(ctx, 112, 40, 70, 30, 5); ctx.fillStyle = C.black; ctx.fill(); ctx.stroke();
+  rr(ctx, 124, 10, 46, 32, 4); ctx.fillStyle = "#222B37"; ctx.fill(); ctx.stroke();       // motor Z
+  rr(ctx, 130, 15, 34, 6, 3); ctx.fillStyle = "rgba(196,205,216,0.5)"; ctx.fill();
+  const g = ctx.createLinearGradient(120, 0, 174, 0);
+  g.addColorStop(0, "#2A3341"); g.addColorStop(0.45, C.black); g.addColorStop(1, C.outline);
+  rr(ctx, 120, 60, 54, 396, 4); ctx.fillStyle = g; ctx.fill(); ctx.stroke();               // columna
+  ctx.fillStyle = "rgba(57,67,79,0.7)"; rr(ctx, 124, 64, 6, 388, 3); ctx.fill(); rr(ctx, 164, 64, 6, 388, 3); ctx.fill();
+  rr(ctx, 140, 66, 15, 384, 2); ctx.fillStyle = C.silverDk; ctx.fill(); ctx.lineWidth = 1.2; ctx.stroke();   // tornillo
+  ctx.save(); ctx.beginPath(); ctx.rect(140, 66, 15, 384); ctx.clip();
+  for (let y = 66 - 15; y < 450 + 15; y += 13) {
+    ctx.strokeStyle = "rgba(238,243,248,0.55)"; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.moveTo(138, y + 15); ctx.lineTo(157, y - 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(142,153,166,0.7)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(138, y + 20); ctx.lineTo(157, y + 3); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawCarriage(ctx, edge, hl) {
+  ctx.lineWidth = 2.5; ctx.strokeStyle = edge;
+  rr(ctx, 104, 362, 88, 48, 7); ctx.fillStyle = "#222B37"; ctx.fill(); ctx.stroke();
+  rr(ctx, 132, 368, 31, 36, 4); ctx.fillStyle = C.silverDk; ctx.fill(); ctx.lineWidth = 1.8; ctx.stroke();
+  rr(ctx, 136, 372, 23, 4, 2); ctx.fillStyle = "rgba(238,243,248,0.7)"; ctx.fill();
+  [374, 398].forEach(y => { circ(ctx, 113, y, 4.2); ctx.fillStyle = C.screw; ctx.fill(); ctx.lineWidth = 1; ctx.stroke(); });
+  // brazo de perfil: proximal, codo, distal
+  ctx.lineWidth = 3; ctx.strokeStyle = edge;
+  rr(ctx, 186, 370, 116, 28, 9); ctx.fillStyle = C.body; ctx.fill(); ctx.stroke();
+  rr(ctx, 192, 374, 102, 6, 3); ctx.fillStyle = "rgba(156,163,175,0.6)"; ctx.fill();
+  rr(ctx, 192, 390, 102, 5, 2.5); ctx.fillStyle = "rgba(69,75,86,0.55)"; ctx.fill();
+  circ(ctx, 222, 384, 4.4); ctx.fillStyle = C.screw; ctx.fill(); ctx.lineWidth = 1; ctx.stroke();
+  circ(ctx, 296, 388, 17); ctx.fillStyle = C.black; ctx.fill(); ctx.lineWidth = 2.2; ctx.stroke();
+  circ(ctx, 296, 388, 9); ctx.fillStyle = C.silver; ctx.fill();
+  circ(ctx, 296, 388, 3); ctx.fillStyle = C.silverDk; ctx.fill();
+  ctx.lineWidth = 3;
+  rr(ctx, 290, 386, 92, 24, 8); ctx.fillStyle = C.body; ctx.fill(); ctx.stroke();
+  rr(ctx, 296, 390, 78, 5, 2.5); ctx.fillStyle = "rgba(156,163,175,0.6)"; ctx.fill();
+  circ(ctx, 342, 398, 4); ctx.fillStyle = C.screw; ctx.fill(); ctx.lineWidth = 1; ctx.stroke();
+  // pinza de perfil
+  ctx.lineWidth = 2.5;
+  rr(ctx, 356, 404, 34, 40, 5); ctx.fillStyle = C.servo; ctx.fill(); ctx.stroke();
+  rr(ctx, 361, 409, 24, 10, 3); ctx.fillStyle = "rgba(110,153,240,0.7)"; ctx.fill();
+  ctx.fillStyle = C.servoDk; circ(ctx, 362, 438, 2.2); ctx.fill(); circ(ctx, 384, 438, 2.2); ctx.fill();
+  circ(ctx, 373, 446, 8); ctx.fillStyle = C.servoDk; ctx.fill(); ctx.lineWidth = 1.5; ctx.stroke();
+  circ(ctx, 373, 446, 3); ctx.fillStyle = C.silver; ctx.fill();
+  const sx = Math.max(0.16, Math.abs(Math.cos(munecaRel() * RAD)));
+  const gap = 7 + pinzaAbierta() * 17;
+  ctx.save(); ctx.translate(373, 452); ctx.scale(sx, 1);
+  [-gap, gap].forEach(off => {
+    rr(ctx, off - 6, 0, 12, 28, 3); ctx.fillStyle = C.body; ctx.fill(); ctx.lineWidth = 2.2; ctx.strokeStyle = edge; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(off - 6, 27); ctx.lineTo(off + 6, 27); ctx.lineTo(off + 3.5, 44); ctx.lineTo(off - 3.5, 44); ctx.closePath();
+    ctx.fillStyle = C.black; ctx.fill(); ctx.stroke();
+  });
+  ctx.restore();
+  if (hl) { rr(ctx, 100, 358, 96, 56, 9); ctx.lineWidth = 4; ctx.strokeStyle = hl; ctx.stroke(); }
+}
 
 function drawSide() {
   const ctx = prepCanvas(cvSide), f = sideFrame();
-  const colX = 16;
-  ctx.fillStyle = "#2a313b"; ctx.fillRect(colX - 5, f.top - 10, 10, f.bot - f.top + 20);   // columna
+  puntos(ctx, f.w, f.h, 26 * f.sc);
+  ctx.save(); ctx.translate(f.ox, f.oy); ctx.scale(f.sc, f.sc);
+  const zReal = robot.known ? robot.z : 0;
+  const zVer = ghost ? ghost.z : zReal;
+  // escala de Z (0 arriba, 134 abajo)
+  ctx.strokeStyle = C.borderHi; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(96, ARM_Y + zDy(0)); ctx.lineTo(96, ARM_Y + zDy(Z_MAX)); ctx.stroke();
   if (showCoords) {
-    ctx.fillStyle = "rgba(255,255,255,0.45)"; ctx.font = "10px ui-monospace, Menlo, monospace";
-    for (let z = 0; z <= Z_MAX; z += 25) {
-      const y = zToY(f, z);
-      ctx.fillRect(colX + 6, y, 5, 1); ctx.fillText(z, colX + 13, y + 3);
-    }
-    ctx.fillStyle = "rgba(255,197,49,0.9)"; ctx.font = "600 10px -apple-system, sans-serif";
-    ctx.fillText("z ↓", colX + 30, 12);
+    ctx.fillStyle = C.textLo; ctx.font = `${Math.round(11 / f.sc)}px ui-monospace, Menlo, monospace`;
+    ctx.textAlign = "right";
+    [0, 25, 50, 75, 100, Z_MAX].forEach(z => {
+      const ty = ARM_Y + zDy(z);
+      ctx.fillRect(86, ty - 0.5, 10, 1.5); ctx.fillText(z, 82, ty + 5);
+    });
+    ctx.textAlign = "start"; ctx.fillStyle = "rgba(111,227,242,0.95)";
+    ctx.fillText("z ↓ mm", 4, 30);
   }
-  if (!robot.known) return;
-  const pinta = (z, color, alpha) => {
-    const y = zToY(f, z);
-    ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = color;
-    ctx.fillRect(colX - 9, y - 7, f.w - colX - 2, 14);      // carro + brazo
+  drawFrame(ctx);
+  if (robot.known) {
+    const mueve = ghost && Math.abs(ghost.z - robot.z) >= 1;
+    if (mueve) {
+      ctx.save(); ctx.globalAlpha = 0.28; ctx.translate(0, zDy(zReal)); drawCarriage(ctx, C.outline, null); ctx.restore();
+    }
+    const dy = zDy(mueve ? zVer : zReal);
+    ctx.save(); ctx.setLineDash([3, 6]); ctx.strokeStyle = C.accent; ctx.lineWidth = 1;     // marca de altura
+    ctx.beginPath(); ctx.moveTo(96, ARM_Y + dy); ctx.lineTo(410, ARM_Y + dy); ctx.stroke(); ctx.restore();
+    ctx.fillStyle = C.accent; ctx.beginPath(); ctx.moveTo(86, ARM_Y - 5 + dy); ctx.lineTo(96, ARM_Y + dy); ctx.lineTo(86, ARM_Y + 5 + dy); ctx.fill();
+    ctx.save(); ctx.translate(0, dy);
+    drawCarriage(ctx, C.outline, drag && drag.mode === "z" ? C.accent : null);
     ctx.restore();
-  };
-  pinta(robot.z, "#aab4c0", ghost && ghost.z !== robot.z ? 0.35 : 1);
-  if (ghost && ghost.z !== robot.z) pinta(ghost.z, "#ffc531", 0.85);
+  }
+  ctx.restore();
 }
 
 function drawAll() {
-  // el lienzo lateral mide lo mismo de alto que el superior
   if (cvTop.clientWidth) {
-    const alto = Math.round(cvTop.clientWidth * 1.05) + "px";
-    cvTop.style.height = alto; cvSide.style.height = alto;
+    cvTop.style.height = Math.round(cvTop.clientWidth * 1.0) + "px";
+    cvSide.style.height = Math.round(Math.min(260, cvSide.clientWidth * 0.62)) + "px";
   }
   drawTop(); drawSide(); updateTarget();
 }
@@ -614,14 +805,11 @@ function updateTarget() {
 }
 
 // ---------- arrastrar ----------
+// El dedo puede ir en cualquier parte del dibujo: se mueve SOLO la pieza elegida arriba
+// (Pinza / Proximal / Distal), y se mueve lo mismo que el dedo (no salta a donde tocas).
 function puntoEvento(cv, ev) {
   const r = cv.getBoundingClientRect();
   return [ev.clientX - r.left, ev.clientY - r.top];
-}
-function distSeg(px, py, ax, ay, bx, by) {
-  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
-  const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
-  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 function puedeMover() {
   if (!connected) { showError("Primero CONECTA el robot"); return false; }
@@ -629,70 +817,72 @@ function puedeMover() {
   if (!robot.known) { showError("Esperando la posición del robot"); return false; }
   return true;
 }
+function angulo(x, y, px, py) { return Math.atan2(y - py, x - px) / RAD; }
 
 cvTop.addEventListener("pointerdown", ev => {
   if (!puedeMover()) return;
-  const f = topFrame(), [px, py] = puntoEvento(cvTop, ev);
+  const f = topFrame(), [x, y] = toWorld(f, ...puntoEvento(cvTop, ev));
   const base = ghost || robot;
-  const p = fk(base.a1, base.a2);
-  const [ex, ey] = toScreen(f, p.ex, p.ey), [tx, ty] = toScreen(f, p.tx, p.ty);
-  let mode = null;
-  if (Math.hypot(px - tx, py - ty) < 30) mode = "tip";
-  else if (distSeg(px, py, ex, ey, tx, ty) < 22) mode = "dist";
-  else if (distSeg(px, py, f.cx, f.cy, ex, ey) < 22) mode = "prox";
-  if (!mode) return;
-  drag = { mode };
-  ghost = { a1: base.a1, a2: base.a2, z: (ghost || robot).z, valid: true };
+  ghost = { a1: base.a1, a2: base.a2, z: base.z, valid: poseValida(base.a1, base.a2) };
+  const p = fk(ghost.a1, ghost.a2);
+  drag = { mode: modo, x, y, tx: p.tx, ty: p.ty, a1: ghost.a1, a2: ghost.a2,
+           ang: modo === "prox" ? angulo(x, y, 0, 0) : angulo(x, y, p.ex, p.ey) };
   cvTop.setPointerCapture(ev.pointerId);
-  moverArrastre(ev);
+  drawAll();
 });
 cvTop.addEventListener("pointermove", ev => { if (drag && drag.mode !== "z") moverArrastre(ev); });
 cvTop.addEventListener("pointerup", soltar);
 cvTop.addEventListener("pointercancel", soltar);
 
 function moverArrastre(ev) {
-  const f = topFrame(), [px, py] = puntoEvento(cvTop, ev);
-  const [x, y] = toWorld(f, px, py);
+  const f = topFrame(), [x, y] = toWorld(f, ...puntoEvento(cvTop, ev));
   let cand = null;
-  if (drag.mode === "tip") {
-    // de las dos soluciones, la válida más parecida a la pose actual del fantasma
-    const sols = ik(x, y).filter(s => poseValida(s.a1, s.a2));
-    if (sols.length) {
-      sols.sort((a, b) => Math.abs(a.a2 - ghost.a2) - Math.abs(b.a2 - ghost.a2));
-      cand = sols[0];
-    } else {
-      const todas = ik(x, y);
-      if (todas.length) cand = { ...todas.sort((a, b) => Math.abs(a.a2 - ghost.a2) - Math.abs(b.a2 - ghost.a2))[0], bad: true };
-    }
-  } else if (drag.mode === "prox") {
-    cand = { a1: norm180(Math.atan2(y, x) / RAD), a2: ghost.a2 };     // el codo se queda igual
-  } else if (drag.mode === "dist") {
-    const p = fk(ghost.a1, ghost.a2);
-    const abs = Math.atan2(y - p.ey, x - p.ex) / RAD;
-    cand = { a1: ghost.a1, a2: norm180(abs - ghost.a1) };
+  if (drag.mode === "pinza") {
+    // la punta se desplaza lo mismo que el dedo; los dos brazos se acomodan (cinemática inversa)
+    drag.tx += x - drag.x; drag.ty += y - drag.y; drag.x = x; drag.y = y;
+    const todas = ik(drag.tx, drag.ty).sort((a, b) => Math.abs(a.a2 - ghost.a2) - Math.abs(b.a2 - ghost.a2));
+    const validas = todas.filter(s => poseValida(s.a1, s.a2));
+    if (validas.length) cand = validas[0];
+    else if (todas.length) cand = { ...todas[0], bad: true };
+    else cand = { a1: ghost.a1, a2: ghost.a2, bad: true };     // fuera de alcance
+  } else {
+    // girar un solo brazo alrededor de su articulación, lo mismo que gira el dedo
+    const pivote = drag.mode === "prox" ? [0, 0] : (() => { const p = fk(ghost.a1, ghost.a2); return [p.ex, p.ey]; })();
+    if (Math.hypot(x - pivote[0], y - pivote[1]) < 12) return;  // muy cerca del eje: el ángulo brinca
+    const ang = angulo(x, y, pivote[0], pivote[1]);
+    const d = norm180(ang - drag.ang); drag.ang = ang;
+    if (drag.mode === "prox") { drag.a1 += d; cand = { a1: drag.a1, a2: ghost.a2 }; }   // el codo se queda igual
+    else { drag.a2 += d; cand = { a1: ghost.a1, a2: drag.a2 }; }                         // el proximal no se mueve
   }
-  if (cand) {
-    ghost.a1 = cand.a1; ghost.a2 = cand.a2;
-    ghost.valid = !cand.bad && poseValida(cand.a1, cand.a2);
-  }
+  ghost.a1 = cand.a1; ghost.a2 = cand.a2;
+  ghost.valid = !cand.bad && poseValida(cand.a1, cand.a2);
   drawAll();
 }
 
 cvSide.addEventListener("pointerdown", ev => {
   if (!puedeMover()) return;
-  drag = { mode: "z" };
   ghost = ghost || { a1: robot.a1, a2: robot.a2, z: robot.z, valid: true };
+  drag = { mode: "z", y: puntoEvento(cvSide, ev)[1], z0: ghost.z };
   cvSide.setPointerCapture(ev.pointerId);
-  ghost.z = Math.round(yToZ(sideFrame(), puntoEvento(cvSide, ev)[1]));
   drawAll();
 });
 cvSide.addEventListener("pointermove", ev => {
   if (!drag || drag.mode !== "z") return;
-  ghost.z = Math.round(yToZ(sideFrame(), puntoEvento(cvSide, ev)[1]));
+  const f = sideFrame(), pxPorMm = f.sc * Z_TRAVEL / Z_MAX;
+  ghost.z = Math.round(Math.max(0, Math.min(Z_MAX, drag.z0 + (puntoEvento(cvSide, ev)[1] - drag.y) / pxPorMm)));
   drawAll();
 });
 cvSide.addEventListener("pointerup", soltar);
 cvSide.addEventListener("pointercancel", soltar);
+
+// botones de modo
+function ponerModo(m) {
+  modo = m;
+  try { localStorage.setItem("scaraModo", m); } catch (e) {}
+  document.querySelectorAll("#modos button").forEach(b => b.classList.toggle("on", b.dataset.modo === m));
+  drawAll();
+}
+document.querySelectorAll("#modos button").forEach(b => b.onclick = () => ponerModo(b.dataset.modo));
 
 // Al soltar se manda el movimiento (si es válido). El fantasma queda como "destino"
 // hasta que el robot contesta con su pose real.
@@ -735,6 +925,7 @@ $("btnCoords").onclick = () => {
   drawAll();
 };
 $("btnCoords").classList.toggle("on", showCoords);
+ponerModo(["pinza", "prox", "dist"].includes(modo) ? modo : "pinza");
 window.addEventListener("resize", drawAll);
 drawAll();
 
