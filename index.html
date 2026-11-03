@@ -70,6 +70,16 @@
     background: #d32f2f; border: 0; color: #fff; font-size: 22px; letter-spacing: 1px; min-height: 66px;
     border-radius: 16px; box-shadow: 0 6px 24px rgba(211,47,47,.45); }
   .hint { color: var(--muted); font-size: 12px; margin: 6px 2px 0; }
+  .views { display: flex; gap: 8px; align-items: flex-start; }
+  #cvTop { flex: 1; min-width: 0; height: 300px; }
+  #cvSide { width: 78px; flex: none; }
+  canvas.view { display: block; background: #0b0d10; border-radius: 12px; touch-action: none; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .toolbar button { min-height: 36px; padding: 6px 10px; font-size: 13px; }
+  .toolbar button.on { background: #1f3b2c; border-color: #2c6b48; color: #7fe0a9; }
+  #target { font: 13px/1.4 ui-monospace, Menlo, monospace; color: var(--muted); margin-top: 8px; min-height: 36px; }
+  #target b { color: var(--text); }
+  #target.bad b { color: #ff8a8c; }
 </style>
 </head>
 <body>
@@ -99,14 +109,28 @@
 </div>
 
 <div class="tabs">
-  <button data-tab="tPunto" class="active">PUNTO</button>
+  <button data-tab="tBrazo" class="active">BRAZO</button>
+  <button data-tab="tPunto">PUNTO</button>
   <button data-tab="tEjes">EJES</button>
   <button data-tab="tPinza">PINZA</button>
   <button data-tab="tConsola">CONSOLA</button>
 </div>
 
+<!-- BRAZO: mover el robot arrastrando su dibujo -->
+<div id="tBrazo" class="tab active card">
+  <div class="toolbar">
+    <button id="btnCoords">Coordenadas</button>
+    <span class="hint" style="margin:0;flex:1">Arrastra la <b>pinza</b>, un <b>brazo</b> o la <b>Z</b> (derecha). Al soltar, el robot va.</span>
+  </div>
+  <div class="views">
+    <canvas id="cvTop" class="view"></canvas>
+    <canvas id="cvSide" class="view"></canvas>
+  </div>
+  <div id="target"></div>
+</div>
+
 <!-- PUNTO: cinemática inversa en el firmware (comando c) -->
-<div id="tPunto" class="tab active card">
+<div id="tPunto" class="tab card">
   <h2>Ir a un punto (mm)</h2>
   <div class="row">
     <div><label class="field">x (frente)</label><input id="px" type="number" inputmode="decimal" value="150"></div>
@@ -290,12 +314,12 @@ function finish(ok) {
   clearTimeout(timer);
   const done = current; current = null;
   if (done && done.kind === "home" && done.cmd === "h") { homed = ok; }
-  if (done && !ok && done.kind === "move") queue = [];      // si algo falló, no sigas con lo demás
+  if (done && !ok && done.kind === "move") { queue = []; ghost = null; drawAll(); }  // si algo falló, no sigas
   if (done && done.kind === "move" && ok) queue.push({ cmd: "?", kind: "query" });  // relee la pose real
   refreshUi();
   dispatch();
 }
-function clearQueue() { clearTimeout(timer); queue = []; current = null; }
+function clearQueue() { clearTimeout(timer); queue = []; current = null; ghost = null; drag = null; drawAll(); }
 
 // ¿Esta línea cierra el comando en curso? (mismas reglas que la interfaz de la compu)
 function closes(kind, line) {
@@ -328,6 +352,7 @@ function onLine(line) {
     $("rCodo").textContent = (+m[2]).toFixed(1) + "°";
     $("rZ").textContent = (+m[3]).toFixed(1);
     syncSlider("sProx", "vProx", +m[1]); syncSlider("sCodo", "vCodo", +m[2]); syncSlider("sZ", "vZ", +m[3]);
+    actualizarRobot(+m[1], +m[2], +m[3]);
   }
   m = line.match(/Pinza: x=(-?[\d.]+) y=(-?[\d.]+) mm/);
   if (m) { $("rX").textContent = (+m[1]).toFixed(1); $("rY").textContent = (+m[2]).toFixed(1); }
@@ -390,7 +415,328 @@ $("cmdIn").addEventListener("keydown", e => { if (e.key === "Enter") sendTyped()
 document.querySelectorAll(".tabs button").forEach(t => t.onclick = () => {
   document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("active", b === t));
   document.querySelectorAll(".tab").forEach(p => p.classList.toggle("active", p.id === t.dataset.tab));
+  if (t.dataset.tab === "tBrazo") drawAll();
 });
+
+
+// ============================================================================
+//  VISTA DEL BRAZO: dibujar el robot y moverlo arrastrando el dibujo
+// ============================================================================
+// Geometría y límites: los mismos que el firmware (scara_final.cpp).
+const L1 = 93.0, L2 = 106.5, Z_MAX = 134;
+const X_CERO = 91.55, Y_CERO = 63.1, ARRASTRE = 0.434, TOL = 0.5;
+const RAD = Math.PI / 180;
+
+const robot = { a1: 0, a2: 0, z: 0, known: false };  // última pose real que reportó el robot
+let ghost = null;   // pose que se está arrastrando: {a1, a2, z, valid}
+let drag = null;    // {mode: "tip" | "prox" | "dist" | "z", startA2}
+let showCoords = true;
+try { showCoords = localStorage.getItem("scaraCoords") !== "0"; } catch (e) {}
+
+// Igual que poseValida() del firmware
+function poseValida(a1, a2) {
+  const gx = X_CERO - a1, gy = Y_CERO + a2 + (1 - ARRASTRE) * a1;
+  if (gx < 0 || gy < 0) return false;                    // más allá de un switch
+  if (a1 < -90 - TOL || a1 > 90 + TOL) return false;
+  if (a2 < -120 - TOL || a2 > 120 + TOL) return false;
+  if (a1 + a2 > 180 + TOL) return false;
+  return true;
+}
+function fk(a1, a2) {
+  const ex = L1 * Math.cos(a1 * RAD), ey = L1 * Math.sin(a1 * RAD);
+  return { ex, ey, tx: ex + L2 * Math.cos((a1 + a2) * RAD), ty: ey + L2 * Math.sin((a1 + a2) * RAD) };
+}
+function norm180(a) { while (a > 180) a -= 360; while (a < -180) a += 360; return a; }
+// Las dos soluciones de la cinemática inversa (codo a un lado o al otro)
+function ik(x, y) {
+  let c = (x * x + y * y - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+  if (c > 1 && c < 1.001) c = 1;
+  if (c > 1 || c < -1) return [];
+  return [-1, 1].map(lado => {
+    const a2 = lado * Math.acos(c) / RAD;
+    const a1 = norm180(Math.atan2(y, x) / RAD - Math.atan2(L2 * Math.sin(a2 * RAD), L1 + L2 * Math.cos(a2 * RAD)) / RAD);
+    return { a1, a2 };
+  });
+}
+
+// ---------- vista superior: x = frente (arriba en la pantalla), y = izquierda ----------
+const cvTop = $("cvTop"), cvSide = $("cvSide");
+function topFrame() {
+  const w = cvTop.clientWidth, h = cvTop.clientHeight;
+  const s = Math.min(w / 2, h * 0.6) / 212;                // px por mm
+  return { w, h, s, cx: w / 2, cy: h * 0.6 };
+}
+function toScreen(f, x, y) { return [f.cx - y * f.s, f.cy - x * f.s]; }
+function toWorld(f, sx, sy) { return [(f.cy - sy) / f.s, (f.cx - sx) / f.s]; }
+
+function prepCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return ctx;
+}
+
+function drawCoords(ctx, f) {
+  ctx.save();
+  // cuadrícula cada 25 mm
+  ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 1;
+  for (let m = -250; m <= 250; m += 25) {
+    let [ax, ay] = toScreen(f, m, -250), [bx, by] = toScreen(f, m, 250);
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    [ax, ay] = toScreen(f, -250, m); [bx, by] = toScreen(f, 250, m);
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  }
+  // ejes
+  ctx.strokeStyle = "rgba(255,197,49,0.55)"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(f.cx, f.h); ctx.lineTo(f.cx, 6); ctx.stroke();        // eje x
+  ctx.beginPath(); ctx.moveTo(f.w - 4, f.cy); ctx.lineTo(4, f.cy); ctx.stroke();    // eje y
+  ctx.fillStyle = "rgba(255,197,49,0.9)"; ctx.font = "600 11px -apple-system, sans-serif";
+  ctx.fillText("x (frente)", f.cx + 5, 14);
+  ctx.fillText("y (izq.)", 6, f.cy - 6);
+  // marcas cada 50 mm
+  ctx.fillStyle = "rgba(255,255,255,0.45)"; ctx.font = "10px ui-monospace, Menlo, monospace";
+  for (let m = 50; m <= 200; m += 50) {
+    let [sx, sy] = toScreen(f, m, 0);
+    if (sy > 18) { ctx.fillText(m, sx + 4, sy + 3); ctx.fillRect(sx - 3, sy, 6, 1); }
+    [sx, sy] = toScreen(f, -m, 0);
+    if (sy < f.h - 4) { ctx.fillText(-m, sx + 4, sy + 3); ctx.fillRect(sx - 3, sy, 6, 1); }
+    [sx, sy] = toScreen(f, 0, m);
+    if (sx > 10) { ctx.fillText(m, sx - 8, sy + 13); ctx.fillRect(sx, sy - 3, 1, 6); }
+    [sx, sy] = toScreen(f, 0, -m);
+    if (sx < f.w - 10) { ctx.fillText(-m, sx - 10, sy + 13); ctx.fillRect(sx, sy - 3, 1, 6); }
+  }
+  // alcance máximo y mínimo
+  ctx.setLineDash([4, 5]); ctx.strokeStyle = "rgba(74,163,255,0.35)"; ctx.lineWidth = 1;
+  [L1 + L2, L2 - L1].forEach(r => { ctx.beginPath(); ctx.arc(f.cx, f.cy, r * f.s, 0, 2 * Math.PI); ctx.stroke(); });
+  ctx.restore();
+}
+
+function drawArm(ctx, f, a1, a2, style) {
+  const p = fk(a1, a2);
+  const [bx, by] = [f.cx, f.cy];
+  const [ex, ey] = toScreen(f, p.ex, p.ey);
+  const [tx, ty] = toScreen(f, p.tx, p.ty);
+  ctx.save();
+  ctx.globalAlpha = style.alpha;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = style.color; ctx.lineWidth = 15 * Math.min(1, f.s * 3.4);
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex, ey); ctx.stroke();
+  ctx.lineWidth = 11 * Math.min(1, f.s * 3.4);
+  ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.fillStyle = "#0b0d10";
+  [[bx, by, 8], [ex, ey, 6]].forEach(([x, y, r]) => { ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fill(); });
+  // pinza (punto que se arrastra)
+  ctx.fillStyle = style.tip; ctx.beginPath(); ctx.arc(tx, ty, 9, 0, 2 * Math.PI); ctx.fill();
+  ctx.strokeStyle = "#0b0d10"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.restore();
+  return { bx, by, ex, ey, tx, ty, tip: p };
+}
+
+function drawTop() {
+  const ctx = prepCanvas(cvTop), f = topFrame();
+  if (showCoords) drawCoords(ctx, f);
+  // base / columna
+  ctx.fillStyle = "#2a313b"; ctx.beginPath(); ctx.arc(f.cx, f.cy, 14, 0, 2 * Math.PI); ctx.fill();
+  if (!robot.known) {
+    ctx.fillStyle = "#8b96a3"; ctx.font = "13px -apple-system, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(connected ? "Pide el estado (?) o haz HOME" : "Conecta el robot", f.cx, f.cy + 40);
+    ctx.textAlign = "start";
+    return;
+  }
+  drawArm(ctx, f, robot.a1, robot.a2, { color: "#aab4c0", tip: "#ffc531", alpha: ghost ? 0.35 : 1 });
+  if (ghost) {
+    const g = drawArm(ctx, f, ghost.a1, ghost.a2,
+      { color: ghost.valid ? "#ffc531" : "#ff4d4f", tip: ghost.valid ? "#ffc531" : "#ff4d4f", alpha: 0.85 });
+    if (showCoords) {   // líneas guía hasta los ejes desde la punta
+      ctx.save(); ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(255,197,49,0.6)";
+      const [ax] = toScreen(f, g.tip.tx, 0), [, ay] = toScreen(f, 0, g.tip.ty);
+      ctx.beginPath(); ctx.moveTo(g.tx, g.ty); ctx.lineTo(f.cx, g.ty); ctx.moveTo(g.tx, g.ty); ctx.lineTo(g.tx, f.cy); ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
+// ---------- vista lateral: Z (0 = arriba, 134 = abajo) ----------
+function sideFrame() {
+  const w = cvSide.clientWidth, h = cvSide.clientHeight;
+  return { w, h, top: 22, bot: h - 22 };
+}
+function zToY(f, z) { return f.top + (z / Z_MAX) * (f.bot - f.top); }
+function yToZ(f, y) { return Math.max(0, Math.min(Z_MAX, (y - f.top) / (f.bot - f.top) * Z_MAX)); }
+
+function drawSide() {
+  const ctx = prepCanvas(cvSide), f = sideFrame();
+  const colX = 16;
+  ctx.fillStyle = "#2a313b"; ctx.fillRect(colX - 5, f.top - 10, 10, f.bot - f.top + 20);   // columna
+  if (showCoords) {
+    ctx.fillStyle = "rgba(255,255,255,0.45)"; ctx.font = "10px ui-monospace, Menlo, monospace";
+    for (let z = 0; z <= Z_MAX; z += 25) {
+      const y = zToY(f, z);
+      ctx.fillRect(colX + 6, y, 5, 1); ctx.fillText(z, colX + 13, y + 3);
+    }
+    ctx.fillStyle = "rgba(255,197,49,0.9)"; ctx.font = "600 10px -apple-system, sans-serif";
+    ctx.fillText("z ↓", colX + 30, 12);
+  }
+  if (!robot.known) return;
+  const pinta = (z, color, alpha) => {
+    const y = zToY(f, z);
+    ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = color;
+    ctx.fillRect(colX - 9, y - 7, f.w - colX - 2, 14);      // carro + brazo
+    ctx.restore();
+  };
+  pinta(robot.z, "#aab4c0", ghost && ghost.z !== robot.z ? 0.35 : 1);
+  if (ghost && ghost.z !== robot.z) pinta(ghost.z, "#ffc531", 0.85);
+}
+
+function drawAll() {
+  // el lienzo lateral mide lo mismo de alto que el superior
+  if (cvTop.clientWidth) {
+    const alto = Math.round(cvTop.clientWidth * 1.05) + "px";
+    cvTop.style.height = alto; cvSide.style.height = alto;
+  }
+  drawTop(); drawSide(); updateTarget();
+}
+
+function updateTarget() {
+  const el = $("target");
+  if (!robot.known) { el.innerHTML = ""; return; }
+  const p = ghost || robot;
+  const t = fk(p.a1, p.a2);
+  el.className = ghost && !ghost.valid ? "bad" : "";
+  el.innerHTML = (ghost ? (ghost.valid ? "Destino: " : "Fuera de límite: ") : "Robot: ") +
+    `<b>x ${t.tx.toFixed(1)}  y ${t.ty.toFixed(1)}  z ${(p.z).toFixed(1)} mm</b><br>` +
+    `proximal ${p.a1.toFixed(1)}°  codo ${p.a2.toFixed(1)}°`;
+}
+
+// ---------- arrastrar ----------
+function puntoEvento(cv, ev) {
+  const r = cv.getBoundingClientRect();
+  return [ev.clientX - r.left, ev.clientY - r.top];
+}
+function distSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+function puedeMover() {
+  if (!connected) { showError("Primero CONECTA el robot"); return false; }
+  if (!homed) { showError("Primero haz HOME"); return false; }
+  if (!robot.known) { showError("Esperando la posición del robot"); return false; }
+  return true;
+}
+
+cvTop.addEventListener("pointerdown", ev => {
+  if (!puedeMover()) return;
+  const f = topFrame(), [px, py] = puntoEvento(cvTop, ev);
+  const base = ghost || robot;
+  const p = fk(base.a1, base.a2);
+  const [ex, ey] = toScreen(f, p.ex, p.ey), [tx, ty] = toScreen(f, p.tx, p.ty);
+  let mode = null;
+  if (Math.hypot(px - tx, py - ty) < 30) mode = "tip";
+  else if (distSeg(px, py, ex, ey, tx, ty) < 22) mode = "dist";
+  else if (distSeg(px, py, f.cx, f.cy, ex, ey) < 22) mode = "prox";
+  if (!mode) return;
+  drag = { mode };
+  ghost = { a1: base.a1, a2: base.a2, z: (ghost || robot).z, valid: true };
+  cvTop.setPointerCapture(ev.pointerId);
+  moverArrastre(ev);
+});
+cvTop.addEventListener("pointermove", ev => { if (drag && drag.mode !== "z") moverArrastre(ev); });
+cvTop.addEventListener("pointerup", soltar);
+cvTop.addEventListener("pointercancel", soltar);
+
+function moverArrastre(ev) {
+  const f = topFrame(), [px, py] = puntoEvento(cvTop, ev);
+  const [x, y] = toWorld(f, px, py);
+  let cand = null;
+  if (drag.mode === "tip") {
+    // de las dos soluciones, la válida más parecida a la pose actual del fantasma
+    const sols = ik(x, y).filter(s => poseValida(s.a1, s.a2));
+    if (sols.length) {
+      sols.sort((a, b) => Math.abs(a.a2 - ghost.a2) - Math.abs(b.a2 - ghost.a2));
+      cand = sols[0];
+    } else {
+      const todas = ik(x, y);
+      if (todas.length) cand = { ...todas.sort((a, b) => Math.abs(a.a2 - ghost.a2) - Math.abs(b.a2 - ghost.a2))[0], bad: true };
+    }
+  } else if (drag.mode === "prox") {
+    cand = { a1: norm180(Math.atan2(y, x) / RAD), a2: ghost.a2 };     // el codo se queda igual
+  } else if (drag.mode === "dist") {
+    const p = fk(ghost.a1, ghost.a2);
+    const abs = Math.atan2(y - p.ey, x - p.ex) / RAD;
+    cand = { a1: ghost.a1, a2: norm180(abs - ghost.a1) };
+  }
+  if (cand) {
+    ghost.a1 = cand.a1; ghost.a2 = cand.a2;
+    ghost.valid = !cand.bad && poseValida(cand.a1, cand.a2);
+  }
+  drawAll();
+}
+
+cvSide.addEventListener("pointerdown", ev => {
+  if (!puedeMover()) return;
+  drag = { mode: "z" };
+  ghost = ghost || { a1: robot.a1, a2: robot.a2, z: robot.z, valid: true };
+  cvSide.setPointerCapture(ev.pointerId);
+  ghost.z = Math.round(yToZ(sideFrame(), puntoEvento(cvSide, ev)[1]));
+  drawAll();
+});
+cvSide.addEventListener("pointermove", ev => {
+  if (!drag || drag.mode !== "z") return;
+  ghost.z = Math.round(yToZ(sideFrame(), puntoEvento(cvSide, ev)[1]));
+  drawAll();
+});
+cvSide.addEventListener("pointerup", soltar);
+cvSide.addEventListener("pointercancel", soltar);
+
+// Al soltar se manda el movimiento (si es válido). El fantasma queda como "destino"
+// hasta que el robot contesta con su pose real.
+function soltar() {
+  if (!drag) return;
+  const mode = drag.mode; drag = null;
+  if (!ghost) return;
+  if (mode === "z") {
+    if (Math.abs(ghost.z - robot.z) >= 1) enqueueKey(`gz${ghost.z}`, "move", "z");
+  } else if (!ghost.valid) {
+    showError("Esa posición se sale de los límites del robot");
+    ghost = null;
+  } else if (Math.abs(ghost.a1 - robot.a1) > 0.3 || Math.abs(ghost.a2 - robot.a2) > 0.3) {
+    enqueueKey(`a${ghost.a1.toFixed(1)},${ghost.a2.toFixed(1)}`, "move", "brazo");
+  }
+  if (ghost && !queue.length && !current) ghost = null;
+  drawAll();
+}
+
+// Como enqueue(), pero si ya hay uno pendiente del mismo tipo lo reemplaza (no se acumulan).
+function enqueueKey(cmd, kind, key) {
+  const pend = queue.find(q => q.key === key);
+  if (pend) { pend.cmd = cmd; return; }
+  queue.push({ cmd, kind, key });
+  dispatch();
+}
+
+// Pose real reportada por el robot (desde onLine)
+function actualizarRobot(a1, a2, z) {
+  robot.a1 = a1; robot.a2 = a2; robot.z = z; robot.known = true;
+  const moviendo = (current && current.kind === "move") || queue.some(q => q.kind === "move");
+  if (!drag && !moviendo) ghost = null;   // ya llegó: quita el fantasma
+  drawAll();
+}
+
+$("btnCoords").onclick = () => {
+  showCoords = !showCoords;
+  try { localStorage.setItem("scaraCoords", showCoords ? "1" : "0"); } catch (e) {}
+  $("btnCoords").classList.toggle("on", showCoords);
+  drawAll();
+};
+$("btnCoords").classList.toggle("on", showCoords);
+window.addEventListener("resize", drawAll);
+drawAll();
 
 if (!navigator.bluetooth) $("noBle").classList.add("show");
 log("in", "Pulsa CONECTAR y elige SCARA-ESP32S3.");
