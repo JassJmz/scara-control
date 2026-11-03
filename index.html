@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#111418">
+<title>SCARA Control</title>
+<!--
+  Control del SCARA desde el teléfono por Bluetooth (BLE, servicio "Nordic UART").
+  En iPhone se abre con la app "Bluefy" (Safari no permite Bluetooth en páginas web).
+  Habla exactamente el mismo protocolo que el firmware scara_final.cpp / scara_home.ino:
+    h, p, ?, a<prox>,<codo>[,z], c<x>,<y>[,z], gz<mm>, sm<0-180>, sp<0-180>, 1/2/3, x/y/z ...
+  Un comando a la vez: se espera la línea con la que el firmware lo cierra antes de mandar
+  el siguiente (el firmware ignora lo que llega mientras se mueve, salvo la "p").
+-->
+<style>
+  :root {
+    --bg: #111418; --card: #1b2027; --card2: #232a33; --text: #e8edf2; --muted: #8b96a3;
+    --accent: #ffc531; --ok: #39c27a; --warn: #ffb020; --err: #ff4d4f; --blue: #4aa3ff;
+    --line: #2d3540;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  body { padding: env(safe-area-inset-top) 12px calc(96px + env(safe-area-inset-bottom)) 12px; }
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 2px 8px; }
+  header h1 { font-size: 20px; margin: 0; letter-spacing: .5px; flex: 1; }
+  header h1 span { color: var(--accent); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px;
+    background: var(--card2); color: var(--muted); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .pill.on .dot { background: var(--ok); } .pill.on { color: var(--ok); }
+  .pill.busy .dot { background: var(--warn); } .pill.busy { color: var(--warn); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin: 10px 0; }
+  .card h2 { font-size: 12px; letter-spacing: 1.2px; color: var(--muted); margin: 0 0 10px; text-transform: uppercase; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  button { font: inherit; font-weight: 700; color: var(--text); background: var(--card2); border: 1px solid var(--line);
+    border-radius: 11px; padding: 12px 8px; min-height: 46px; }
+  button:active { transform: scale(.98); filter: brightness(1.2); }
+  button:disabled { opacity: .35; }
+  button.primary { background: var(--accent); color: #111; border-color: var(--accent); }
+  button.ok { background: #1f3b2c; border-color: #2c6b48; color: #7fe0a9; }
+  .banner { display: none; margin: 8px 0; padding: 10px 12px; border-radius: 11px; font-weight: 600; font-size: 14px; }
+  .banner.show { display: block; }
+  .banner.warn { background: #3a2f10; color: var(--warn); border: 1px solid #6b5517; }
+  .banner.err { background: #3a1416; color: #ff8a8c; border: 1px solid #6b2427; }
+  label.field { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input[type=number], input[type=text] { width: 100%; font: inherit; font-size: 17px; color: var(--text);
+    background: #0d1014; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  .slider { margin: 12px 0 4px; }
+  .slider .top { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); }
+  .slider .top b { color: var(--text); font-size: 16px; }
+  input[type=range] { width: 100%; height: 34px; accent-color: var(--accent); }
+  .readout { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .readout div { background: #0d1014; border-radius: 10px; padding: 8px; text-align: center; }
+  .readout small { display: block; color: var(--muted); font-size: 11px; }
+  .readout b { font-size: 16px; }
+  .tabs { display: flex; gap: 6px; margin-top: 10px; }
+  .tabs button { flex: 1; min-height: 40px; padding: 8px 4px; font-size: 14px; }
+  .tabs button.active { background: var(--accent); color: #111; border-color: var(--accent); }
+  .tab { display: none; } .tab.active { display: block; }
+  .chips { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .chips button { min-height: 40px; font-size: 13px; padding: 8px 4px; }
+  #log { height: 260px; overflow-y: auto; background: #0b0d10; border-radius: 10px; padding: 8px;
+    font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+  #log .tx { color: var(--blue); } #log .rx { color: #7fe0a9; } #log .er { color: #ff8a8c; } #log .in { color: var(--muted); }
+  #stop { position: fixed; left: 12px; right: 12px; bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 10;
+    background: #d32f2f; border: 0; color: #fff; font-size: 22px; letter-spacing: 1px; min-height: 66px;
+    border-radius: 16px; box-shadow: 0 6px 24px rgba(211,47,47,.45); }
+  .hint { color: var(--muted); font-size: 12px; margin: 6px 2px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>SCARA <span>Control</span></h1>
+  <div id="pill" class="pill"><span class="dot"></span><span id="pillText">Desconectado</span></div>
+</header>
+
+<div id="noBle" class="banner err">Este navegador no tiene Bluetooth. En iPhone abre esta página con la app <b>Bluefy</b>.</div>
+<div id="homeWarn" class="banner warn">SIN CALIBRAR — pulsa HOME antes de mover el brazo.</div>
+<div id="errBanner" class="banner err"></div>
+
+<div class="card">
+  <div class="row">
+    <button id="btnConnect" class="primary">CONECTAR</button>
+    <button id="btnHome" disabled>HOME</button>
+  </div>
+  <div class="readout" style="margin-top:10px">
+    <div><small>PROXIMAL</small><b id="rProx">—</b></div>
+    <div><small>CODO</small><b id="rCodo">—</b></div>
+    <div><small>Z ABAJO</small><b id="rZ">—</b></div>
+    <div><small>X mm</small><b id="rX">—</b></div>
+    <div><small>Y mm</small><b id="rY">—</b></div>
+    <div><small>SERVOS</small><b id="rServos">—</b></div>
+  </div>
+</div>
+
+<div class="tabs">
+  <button data-tab="tPunto" class="active">PUNTO</button>
+  <button data-tab="tEjes">EJES</button>
+  <button data-tab="tPinza">PINZA</button>
+  <button data-tab="tConsola">CONSOLA</button>
+</div>
+
+<!-- PUNTO: cinemática inversa en el firmware (comando c) -->
+<div id="tPunto" class="tab active card">
+  <h2>Ir a un punto (mm)</h2>
+  <div class="row">
+    <div><label class="field">x (frente)</label><input id="px" type="number" inputmode="decimal" value="150"></div>
+    <div><label class="field">y (izquierda)</label><input id="py" type="number" inputmode="decimal" value="0"></div>
+    <div><label class="field">z (bajar)</label><input id="pz" type="number" inputmode="decimal" value="0"></div>
+  </div>
+  <div class="row" style="margin-top:10px"><button id="btnPunto" class="primary needHome">IR AL PUNTO</button></div>
+  <p class="hint">Origen = eje de la columna. Alcance 13.5–199.5 mm. Z: 0 = arriba, 134 = lo más abajo.</p>
+  <h2 style="margin-top:14px">Posiciones rápidas</h2>
+  <div class="chips">
+    <button class="needHome" data-cmd="a0,0">Al frente</button>
+    <button class="needHome" data-cmd="a90,0">Izquierda</button>
+    <button class="needHome" data-cmd="a-90,0">Derecha</button>
+    <button class="needHome" data-cmd="c150,0">c150,0</button>
+    <button class="needHome" data-cmd="c100,100">c100,100</button>
+    <button class="needHome" data-cmd="a0,90">Codo 90°</button>
+  </div>
+</div>
+
+<!-- EJES: ángulos del robot (comando a) y Z (comando gz) -->
+<div id="tEjes" class="tab card">
+  <h2>Ángulos del robot</h2>
+  <div class="slider"><div class="top"><span>Proximal</span><b><span id="vProx">0</span>°</b></div>
+    <input id="sProx" class="needHome" type="range" min="-90" max="90" step="1" value="0"></div>
+  <div class="slider"><div class="top"><span>Codo</span><b><span id="vCodo">0</span>°</b></div>
+    <input id="sCodo" class="needHome" type="range" min="-120" max="120" step="1" value="0"></div>
+  <div class="slider"><div class="top"><span>Z (bajar)</span><b><span id="vZ">0</span> mm</b></div>
+    <input id="sZ" class="needHome" type="range" min="0" max="134" step="1" value="0"></div>
+  <p class="hint">Se mueve al soltar el slider. Positivo = antihorario visto desde arriba. El firmware rechaza las poses fuera de límite.</p>
+</div>
+
+<!-- PINZA: servos crudos (sm / sp) -->
+<div id="tPinza" class="tab card">
+  <h2>Muñeca</h2>
+  <div class="slider"><div class="top"><span>Ángulo del servo (90 = recta)</span><b><span id="vMun">90</span></b></div>
+    <input id="sMun" type="range" min="0" max="180" step="1" value="90"></div>
+  <div class="row"><button data-cmd="sm0">0</button><button data-cmd="sm90">Recta</button><button data-cmd="sm180">180</button></div>
+  <h2 style="margin-top:16px">Pinza</h2>
+  <div class="slider"><div class="top"><span>Ángulo (0 = abierta, 150 = cerrada)</span><b><span id="vPin">90</span></b></div>
+    <input id="sPin" type="range" min="0" max="150" step="1" value="90"></div>
+  <div class="row"><button class="ok" data-cmd="sp0">ABRIR</button><button data-cmd="sp150">CERRAR</button></div>
+  <p class="hint">Para agarrar un cubo no cierres al 150: usa el slider hasta que lo sujete sin forzar el servo.</p>
+</div>
+
+<!-- CONSOLA -->
+<div id="tConsola" class="tab card">
+  <div id="log"></div>
+  <div class="row" style="margin-top:8px">
+    <input id="cmdIn" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Comando (ej. ?, h, c150,0,50)" style="flex:3">
+    <button id="btnSend" style="flex:1">ENVIAR</button>
+  </div>
+  <div class="chips" style="margin-top:8px">
+    <button data-cmd="?">? estado</button>
+    <button data-cmd="1">1 prox.</button>
+    <button data-cmd="2">2 distal</button>
+    <button data-cmd="3">3 Z</button>
+    <button data-cmd="x">home X</button>
+    <button data-cmd="y">home Y</button>
+  </div>
+</div>
+
+<button id="stop">PARO</button>
+
+<script>
+const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";   // teléfono -> ESP32
+const TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";   // ESP32 -> teléfono
+const TIMEOUT_S = { home: 150, move: 60, servo: 5, query: 5, other: 30 };
+
+let device = null, rxChar = null, buffer = "";
+let queue = [], current = null, timer = null;
+let homed = false, connected = false;
+
+const $ = id => document.getElementById(id);
+
+// ---------- registro en la consola ----------
+function log(cls, text) {
+  const el = $("log");
+  const t = new Date().toTimeString().slice(0, 8);
+  const div = document.createElement("div");
+  div.className = cls;
+  div.textContent = `${t} ${cls === "tx" ? "→" : cls === "in" ? "·" : "←"} ${text}`;
+  el.appendChild(div);
+  while (el.childNodes.length > 400) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+function showError(text) {
+  const b = $("errBanner");
+  b.textContent = text; b.classList.add("show");
+  clearTimeout(showError.t); showError.t = setTimeout(() => b.classList.remove("show"), 6000);
+}
+
+// ---------- estado de la pantalla ----------
+function refreshUi() {
+  const pill = $("pill");
+  pill.className = "pill" + (connected ? (current ? " busy" : " on") : "");
+  $("pillText").textContent = !connected ? "Desconectado" : current ? "Moviendo…" : homed ? "Listo" : "Conectado";
+  $("btnConnect").textContent = connected ? "DESCONECTAR" : "CONECTAR";
+  $("btnHome").disabled = !connected;
+  $("homeWarn").classList.toggle("show", connected && !homed);
+  document.querySelectorAll(".needHome").forEach(el => el.disabled = !(connected && homed));
+}
+
+// ---------- Bluetooth ----------
+async function connect() {
+  if (!navigator.bluetooth) { $("noBle").classList.add("show"); return; }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "SCARA" }, { services: [SERVICE] }],
+      optionalServices: [SERVICE],
+    });
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+    log("in", "Conectando a " + (device.name || "robot") + "…");
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+    rxChar = await service.getCharacteristic(RX);
+    const txChar = await service.getCharacteristic(TX);
+    await txChar.startNotifications();
+    txChar.addEventListener("characteristicvaluechanged", onNotify);
+    buffer = ""; connected = true; homed = false;
+    log("in", "Conectado. Pulsa HOME.");
+    refreshUi();
+    enqueue("?", "query");
+  } catch (e) {
+    log("er", "No se pudo conectar: " + e.message);
+  }
+}
+function disconnect() { if (device && device.gatt.connected) device.gatt.disconnect(); }
+function onDisconnected() {
+  connected = false; homed = false; rxChar = null;
+  clearQueue();
+  log("er", "Bluetooth desconectado. Vuelve a CONECTAR y haz HOME.");
+  refreshUi();
+}
+
+const decoder = new TextDecoder();
+function onNotify(ev) {
+  buffer += decoder.decode(ev.target.value);
+  let i;
+  while ((i = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, i).replace(/\r$/, "").trim();
+    buffer = buffer.slice(i + 1);
+    if (line) onLine(line);
+  }
+}
+
+async function writeRaw(text) {
+  if (!rxChar) return;
+  const data = new TextEncoder().encode(text + "\n");
+  for (let i = 0; i < data.length; i += 20) {   // paquetes de 20 bytes: funciona con cualquier MTU
+    const chunk = data.slice(i, i + 20);
+    if (rxChar.writeValueWithoutResponse) await rxChar.writeValueWithoutResponse(chunk);
+    else await rxChar.writeValue(chunk);
+  }
+}
+
+// ---------- cola: un comando a la vez ----------
+function kindOf(cmd) {
+  const c = cmd.toLowerCase();
+  if (c === "h" || c === "x" || c === "y" || c === "z") return "home";
+  if (c === "?") return "query";
+  if (c.startsWith("sm") || c.startsWith("sp")) return "servo";
+  if (/^[acgm123]/.test(c)) return "move";
+  return "other";
+}
+function enqueue(cmd, kind = kindOf(cmd)) {
+  if (!connected) { showError("Primero CONECTA el robot"); return; }
+  queue.push({ cmd, kind });
+  dispatch();
+}
+function dispatch() {
+  if (current || !queue.length) return;
+  current = queue.shift();
+  log("tx", current.cmd);
+  writeRaw(current.cmd).catch(e => log("er", "Error al enviar: " + e.message));
+  timer = setTimeout(() => { log("er", `Sin respuesta a "${current.cmd}"`); finish(false); },
+                     (TIMEOUT_S[current.kind] || 30) * 1000);
+  refreshUi();
+}
+function finish(ok) {
+  clearTimeout(timer);
+  const done = current; current = null;
+  if (done && done.kind === "home" && done.cmd === "h") { homed = ok; }
+  if (done && !ok && done.kind === "move") queue = [];      // si algo falló, no sigas con lo demás
+  if (done && done.kind === "move" && ok) queue.push({ cmd: "?", kind: "query" });  // relee la pose real
+  refreshUi();
+  dispatch();
+}
+function clearQueue() { clearTimeout(timer); queue = []; current = null; }
+
+// ¿Esta línea cierra el comando en curso? (mismas reglas que la interfaz de la compu)
+function closes(kind, line) {
+  if (line.includes("PARO DE EMERGENCIA")) return false;
+  if (kind === "home") {
+    if (line === "HOME COMPLETO") return true;
+    if (line === "HOME INCOMPLETO" || line.startsWith("ERROR")) return false;
+    if (/homeado \(switch/.test(line) && current.cmd !== "h") return true;   // x / y / z solos
+    return null;
+  }
+  if (kind === "query") return line.startsWith("ESP32:") ? true : null;
+  if (kind === "servo") return (line.startsWith("Muneca en") || line.startsWith("Pinza en")) ? true : null;
+  if (line === "Listo." || line.endsWith("pasos desde home.")) return true;
+  if (line.startsWith("ERROR") || line.startsWith("Comando no valido") || line.startsWith("Formato")) return false;
+  return null;
+}
+
+// ---------- respuestas del robot ----------
+function onLine(line) {
+  const isErr = line.startsWith("ERROR") || line.startsWith("!!!");
+  log(isErr ? "er" : "rx", line);
+  if (isErr) showError(line);
+
+  if (line.startsWith("SCARA listo")) { homed = false; clearQueue(); refreshUi(); }   // el ESP32 se reinició
+  if (line.includes("PARO DE EMERGENCIA")) { homed = false; clearQueue(); refreshUi(); return; }
+
+  let m = line.match(/Robot: proximal=(-?[\d.]+) codo=(-?[\d.]+) Z=(-?[\d.]+) mm/);
+  if (m) {
+    $("rProx").textContent = (+m[1]).toFixed(1) + "°";
+    $("rCodo").textContent = (+m[2]).toFixed(1) + "°";
+    $("rZ").textContent = (+m[3]).toFixed(1);
+    syncSlider("sProx", "vProx", +m[1]); syncSlider("sCodo", "vCodo", +m[2]); syncSlider("sZ", "vZ", +m[3]);
+  }
+  m = line.match(/Pinza: x=(-?[\d.]+) y=(-?[\d.]+) mm/);
+  if (m) { $("rX").textContent = (+m[1]).toFixed(1); $("rY").textContent = (+m[2]).toFixed(1); }
+  m = line.match(/Servos: muneca=(\d+) pinza=(\d+)/);
+  if (m) { $("rServos").textContent = `${m[1]} / ${m[2]}`; syncSlider("sMun", "vMun", +m[1]); syncSlider("sPin", "vPin", +m[2]); }
+  m = line.match(/X: \S+, pos=-?\d+ \((homeado|sin homear)\)\s+Y: \S+, pos=-?\d+ \((homeado|sin homear)\)\s+Z: \S+, pos=-?\d+ \((homeado|sin homear)\)/);
+  if (m) { homed = m[1] === "homeado" && m[2] === "homeado" && m[3] === "homeado"; refreshUi(); }
+
+  if (current) {
+    const r = closes(current.kind, line);
+    if (r !== null) finish(r);
+  }
+}
+
+// ---------- controles ----------
+function syncSlider(id, labelId, value) {
+  const s = $(id);
+  if (document.activeElement === s) return;   // no lo muevas si el usuario lo está tocando
+  s.value = Math.round(value); $(labelId).textContent = Math.round(value);
+}
+function fmt(v) { return (+v).toFixed(1).replace(/\.0$/, ""); }
+
+$("btnConnect").onclick = () => connected ? disconnect() : connect();
+$("btnHome").onclick = () => { homed = false; refreshUi(); enqueue("h", "home"); };
+$("stop").onclick = () => {
+  // El paro no espera la cola: sale al instante, aunque el robot se esté moviendo.
+  clearQueue(); homed = false;
+  log("tx", "p (PARO)");
+  writeRaw("p").catch(() => {});
+  refreshUi();
+};
+$("btnPunto").onclick = () => {
+  const x = $("px").value, y = $("py").value, z = $("pz").value;
+  if (x === "" || y === "") { showError("Escribe x y y"); return; }
+  enqueue(z === "" ? `c${fmt(x)},${fmt(y)}` : `c${fmt(x)},${fmt(y)},${fmt(z)}`, "move");
+};
+document.querySelectorAll("[data-cmd]").forEach(b => b.onclick = () => enqueue(b.dataset.cmd));
+
+// Sliders: muestran el valor mientras se arrastran y mandan el comando al soltar.
+[["sProx", "vProx"], ["sCodo", "vCodo"], ["sZ", "vZ"], ["sMun", "vMun"], ["sPin", "vPin"]].forEach(([s, v]) => {
+  $(s).addEventListener("input", () => $(v).textContent = $(s).value);
+});
+$("sProx").addEventListener("change", sendAngles);
+$("sCodo").addEventListener("change", sendAngles);
+function sendAngles() { enqueue(`a${$("sProx").value},${$("sCodo").value}`, "move"); }
+$("sZ").addEventListener("change", () => enqueue(`gz${$("sZ").value}`, "move"));
+$("sMun").addEventListener("change", () => enqueue(`sm${$("sMun").value}`, "servo"));
+$("sPin").addEventListener("change", () => enqueue(`sp${$("sPin").value}`, "servo"));
+
+function sendTyped() {
+  const c = $("cmdIn").value.trim();
+  if (!c) return;
+  $("cmdIn").value = "";
+  if (c.toLowerCase() === "p") { $("stop").onclick(); return; }
+  enqueue(c);
+}
+$("btnSend").onclick = sendTyped;
+$("cmdIn").addEventListener("keydown", e => { if (e.key === "Enter") sendTyped(); });
+
+document.querySelectorAll(".tabs button").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("active", b === t));
+  document.querySelectorAll(".tab").forEach(p => p.classList.toggle("active", p.id === t.dataset.tab));
+});
+
+if (!navigator.bluetooth) $("noBle").classList.add("show");
+log("in", "Pulsa CONECTAR y elige SCARA-ESP32S3.");
+refreshUi();
+</script>
+</body>
+</html>
