@@ -450,6 +450,7 @@ function poseValida(a1, a2) {
   if (a1 < -90 - TOL || a1 > 90 + TOL) return false;
   if (a2 < -120 - TOL || a2 > 120 + TOL) return false;
   if (a1 + a2 > 180 + TOL) return false;
+  if (a1 + a2 < -180 - TOL) return false;                 // la pinza pegaría con la columna Z
   return true;
 }
 function fk(a1, a2) {
@@ -866,6 +867,7 @@ function motivo(a1, a2) {
   if (a1 < -90 - TOL || a1 > 90 + TOL) return "el proximal solo gira de −90° a 90°";
   if (a2 < -120 - TOL || a2 > 120 + TOL) return "el codo solo gira de −120° a 120°";
   if (a1 + a2 > 180 + TOL) return "el distal no puede apuntar más allá de 180°";
+  if (a1 + a2 < -180 - TOL) return "la pinza pegaría con la columna Z";
   return null;
 }
 function ikValida(x, y, cerca) {
