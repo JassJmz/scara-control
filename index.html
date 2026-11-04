@@ -524,8 +524,30 @@ function prepCanvas(cv) {
   return ctx;
 }
 
+// Zona que alcanza la pinza respetando los límites (se calcula una sola vez, 2 mm por pixel)
+let zonaImg = null;
+function zona() {
+  if (zonaImg) return zonaImg;
+  const n = 210, half = 210, paso = 2 * half / n;
+  const c = document.createElement("canvas"); c.width = n; c.height = n;
+  const cx = c.getContext("2d"), img = cx.createImageData(n, n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    // pixel (i, j): i hacia la izquierda de la pantalla = +y; j hacia abajo = −x
+    const y = half - (i + 0.5) * paso, x = half - (j + 0.5) * paso;
+    if (ik(x, y).some(q => poseValida(q.a1, q.a2))) {
+      const k = (j * n + i) * 4; img.data[k] = 53; img.data[k + 1] = 200; img.data[k + 2] = 220; img.data[k + 3] = 34;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  return (zonaImg = c);
+}
 function drawCoords(ctx, f) {
   ctx.save();
+  const [zx, zy] = toScreen(f, 210, 210);                  // esquina arriba-izquierda (x frente, y izq.)
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(zona(), zx, zy, 420 * f.s, 420 * f.s);
+  ctx.fillStyle = "rgba(53,200,220,0.75)"; ctx.font = "11px -apple-system, sans-serif";
+  ctx.fillText("zona sombreada = donde llega la pinza", 8, f.h - 8);
   ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 1;          // cuadrícula cada 25 mm
   for (let m = -275; m <= 275; m += 25) {
     let [ax, ay] = toScreen(f, m, -275), [bx, by] = toScreen(f, m, 275);
@@ -798,8 +820,9 @@ function updateTarget() {
   if (!robot.known) { el.innerHTML = ""; return; }
   const p = ghost || robot;
   const t = fk(p.a1, p.a2);
-  el.className = ghost && !ghost.valid ? "bad" : "";
-  el.innerHTML = (ghost ? (ghost.valid ? "Destino: " : "Fuera de límite: ") : "Robot: ") +
+  el.className = ghost && ghost.razon ? "bad" : "";
+  el.innerHTML = (ghost && ghost.razon ? `Se detuvo en el límite: ${ghost.razon}<br>` : "") +
+    (ghost ? "Destino: " : "Robot: ") +
     `<b>x ${t.tx.toFixed(1)}  y ${t.ty.toFixed(1)}  z ${(p.z).toFixed(1)} mm</b><br>` +
     `proximal ${p.a1.toFixed(1)}°  codo ${p.a2.toFixed(1)}°`;
 }
@@ -834,28 +857,58 @@ cvTop.addEventListener("pointermove", ev => { if (drag && drag.mode !== "z") mov
 cvTop.addEventListener("pointerup", soltar);
 cvTop.addEventListener("pointercancel", soltar);
 
+// Por qué una pose no se puede (mismo orden que pose_error de la interfaz de la compu)
+function motivo(a1, a2) {
+  const gx = X_CERO - a1, gy = Y_CERO + a2 + (1 - ARRASTRE) * a1;
+  if (gx < 0) return "el proximal pasaría de su switch";
+  if (gy < 0) return `el codo choca con el switch del distal (con el proximal en ${a1.toFixed(0)}° el codo llega hasta ${(-Y_CERO - (1 - ARRASTRE) * a1).toFixed(0)}°)`;
+  if (a1 < -90 - TOL || a1 > 90 + TOL) return "el proximal solo gira de −90° a 90°";
+  if (a2 < -120 - TOL || a2 > 120 + TOL) return "el codo solo gira de −120° a 120°";
+  if (a1 + a2 > 180 + TOL) return "el distal no puede apuntar más allá de 180°";
+  return null;
+}
+function ikValida(x, y, cerca) {
+  const s = ik(x, y).filter(q => poseValida(q.a1, q.a2)).sort((a, b) => Math.abs(a.a2 - cerca) - Math.abs(b.a2 - cerca));
+  return s.length ? s[0] : null;
+}
+// El robot se detiene en el límite: la pose válida más lejana en el camino (t de 0 a 1)
+function masLejos(poseEn) {
+  let lo = 0, hi = 1, mejor = poseEn(0);
+  for (let i = 0; i < 18; i++) {
+    const mid = (lo + hi) / 2, q = poseEn(mid);
+    if (q) { mejor = q; lo = mid; } else hi = mid;
+  }
+  return mejor;
+}
+
 function moverArrastre(ev) {
   const f = topFrame(), [x, y] = toWorld(f, ...puntoEvento(cvTop, ev));
-  let cand = null;
+  let poseEn, razon = null;
   if (drag.mode === "pinza") {
     // la punta se desplaza lo mismo que el dedo; los dos brazos se acomodan (cinemática inversa)
     drag.tx += x - drag.x; drag.ty += y - drag.y; drag.x = x; drag.y = y;
-    const todas = ik(drag.tx, drag.ty).sort((a, b) => Math.abs(a.a2 - ghost.a2) - Math.abs(b.a2 - ghost.a2));
-    const validas = todas.filter(s => poseValida(s.a1, s.a2));
-    if (validas.length) cand = validas[0];
-    else if (todas.length) cand = { ...todas[0], bad: true };
-    else cand = { a1: ghost.a1, a2: ghost.a2, bad: true };     // fuera de alcance
+    const p = fk(ghost.a1, ghost.a2), sx = p.tx, sy = p.ty, cerca = ghost.a2;
+    poseEn = t => ikValida(sx + (drag.tx - sx) * t, sy + (drag.ty - sy) * t, cerca);
+    if (!poseEn(1)) {
+      const r = Math.hypot(drag.tx, drag.ty);
+      if (r > L1 + L2) razon = "la pinza no llega tan lejos";
+      else if (r < L2 - L1) razon = "punto demasiado pegado a la columna";
+      else { const q = ik(drag.tx, drag.ty).sort((a, b) => Math.abs(a.a2 - cerca) - Math.abs(b.a2 - cerca))[0]; razon = motivo(q.a1, q.a2) || "fuera de límite"; }
+    }
   } else {
     // girar un solo brazo alrededor de su articulación, lo mismo que gira el dedo
     const pivote = drag.mode === "prox" ? [0, 0] : (() => { const p = fk(ghost.a1, ghost.a2); return [p.ex, p.ey]; })();
     if (Math.hypot(x - pivote[0], y - pivote[1]) < 12) return;  // muy cerca del eje: el ángulo brinca
     const ang = angulo(x, y, pivote[0], pivote[1]);
     const d = norm180(ang - drag.ang); drag.ang = ang;
-    if (drag.mode === "prox") { drag.a1 += d; cand = { a1: drag.a1, a2: ghost.a2 }; }   // el codo se queda igual
-    else { drag.a2 += d; cand = { a1: ghost.a1, a2: drag.a2 }; }                         // el proximal no se mueve
+    const a10 = ghost.a1, a20 = ghost.a2;
+    const val = (a1, a2) => poseValida(a1, a2) ? { a1, a2 } : null;
+    if (drag.mode === "prox") { drag.a1 += d; poseEn = t => val(a10 + (drag.a1 - a10) * t, a20); razon = motivo(drag.a1, a20); }
+    else { drag.a2 += d; poseEn = t => val(a10, a20 + (drag.a2 - a20) * t); razon = motivo(a10, drag.a2); }
   }
-  ghost.a1 = cand.a1; ghost.a2 = cand.a2;
-  ghost.valid = !cand.bad && poseValida(cand.a1, cand.a2);
+  const q = razon ? masLejos(poseEn) : poseEn(1);
+  if (q) { ghost.a1 = q.a1; ghost.a2 = q.a2; }
+  ghost.valid = true; ghost.razon = razon;
   drawAll();
 }
 
