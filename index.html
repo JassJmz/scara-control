@@ -174,10 +174,24 @@
     <input id="sMun" type="range" min="0" max="180" step="1" value="90"></div>
   <div class="row"><button data-cmd="sm0">0</button><button data-cmd="sm90">Recta</button><button data-cmd="sm180">180</button></div>
   <h2 style="margin-top:16px">Pinza</h2>
-  <div class="slider"><div class="top"><span>Ángulo (0 = abierta, 150 = cerrada)</span><b><span id="vPin">90</span></b></div>
-    <input id="sPin" type="range" min="0" max="150" step="1" value="90"></div>
-  <div class="row"><button class="ok" data-cmd="sp0">ABRIR</button><button data-cmd="sp150">CERRAR</button></div>
-  <p class="hint">Para agarrar un cubo no cierres al 150: usa el slider hasta que lo sujete sin forzar el servo.</p>
+  <div class="slider"><div class="top"><span>Ángulo del servo</span><b><span id="vPin">90</span></b></div>
+    <input id="sPin" type="range" min="0" max="180" step="1" value="90"></div>
+  <div class="row"><button class="ok" id="btnAbrir">ABRIR</button><button id="btnCerrar">CERRAR</button></div>
+  <p class="hint" id="calInfo">Abierta = 0 · cerrada = 150 (de fábrica)</p>
+
+  <h2 style="margin-top:16px">Calibrar abierta / cerrada</h2>
+  <p class="hint" style="margin-top:0">Mueve la pinza poco a poco. Cuando esté como la quieres, guárdala.
+    Se guarda <b>en el robot</b>: vale para siempre, aquí y en la compu.</p>
+  <div class="readout" style="grid-template-columns:1fr;margin:8px 0"><div><small>SERVO DE LA PINZA</small><b id="calRaw">—</b></div></div>
+  <div class="chips" style="grid-template-columns:repeat(4,1fr)">
+    <button data-nudge="-10">−10</button><button data-nudge="-1">−1</button>
+    <button data-nudge="1">+1</button><button data-nudge="10">+10</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="primary" id="btnGuardarA">GUARDAR ABIERTA</button>
+    <button class="primary" id="btnGuardarC">GUARDAR CERRADA</button>
+  </div>
+  <div class="row" style="margin-top:8px"><button id="btnCalFab">Regresar a los de fábrica (0 / 150)</button></div>
 </div>
 
 <!-- CONSOLA -->
@@ -298,6 +312,7 @@ function kindOf(cmd) {
   if (c === "h" || c === "x" || c === "y" || c === "z") return "home";
   if (c === "?") return "query";
   if (c.startsWith("sm") || c.startsWith("sp")) return "servo";
+  if (/^k[acr]\d*$/.test(c)) return "cal";
   if (/^[acgm123]/.test(c)) return "move";
   return "other";
 }
@@ -336,6 +351,7 @@ function closes(kind, line) {
     return null;
   }
   if (kind === "query") return line.startsWith("ESP32:") ? true : null;
+  if (kind === "cal") return line.startsWith("Pinza cal:") ? true : null;
   if (kind === "servo") return (line.startsWith("Muneca en") || line.startsWith("Pinza en")) ? true : null;
   if (line === "Listo." || line.endsWith("pasos desde home.")) return true;
   if (line.startsWith("ERROR") || line.startsWith("Comando no valido") || line.startsWith("Formato")) return false;
@@ -363,9 +379,11 @@ function onLine(line) {
   if (m) { $("rX").textContent = (+m[1]).toFixed(1); $("rY").textContent = (+m[2]).toFixed(1); }
   m = line.match(/Servos: muneca=(\d+) pinza=(\d+)/);
   if (m) { $("rServos").textContent = `${m[1]} / ${m[2]}`; syncSlider("sMun", "vMun", +m[1]); syncSlider("sPin", "vPin", +m[2]);
-           servos.mun = +m[1]; servos.pin = +m[2]; drawAll(); }
+           servos.mun = +m[1]; servos.pin = +m[2]; $("calRaw").textContent = servos.pin + "°"; drawAll(); }
   m = line.match(/^Muneca en (\d+)/); if (m) { servos.mun = +m[1]; drawAll(); }
-  m = line.match(/^Pinza en (\d+)/); if (m) { servos.pin = +m[1]; drawAll(); }
+  m = line.match(/^Pinza en (\d+)/); if (m) { servos.pin = +m[1]; syncSlider("sPin", "vPin", +m[1]); drawAll(); }
+  m = line.match(/Pinza cal: abierta=(\d+) cerrada=(\d+)/);
+  if (m) { cal.abierta = +m[1]; cal.cerrada = +m[2]; mostrarCal(); drawAll(); }
   m = line.match(/X: \S+, pos=-?\d+ \((homeado|sin homear)\)\s+Y: \S+, pos=-?\d+ \((homeado|sin homear)\)\s+Z: \S+, pos=-?\d+ \((homeado|sin homear)\)/);
   if (m) { homed = m[1] === "homeado" && m[2] === "homeado" && m[3] === "homeado"; refreshUi(); }
 
@@ -489,7 +507,12 @@ let modo = "pinza";
 try { modo = localStorage.getItem("scaraModo") || "pinza"; } catch (e) {}
 
 function munecaRel() { return servos.mun - 90; }                                   // 90 = recta
-function pinzaAbierta() { return Math.max(0, Math.min(1, (150 - servos.pin) / 150)); } // 0 cerrada .. 1 abierta
+// Calibración de la pinza: la guarda el ROBOT (flash del ESP32) y llega con "?" / ka / kc
+const cal = { abierta: 0, cerrada: 150 };
+function pinzaAbierta() {   // 0 = cerrada .. 1 = abierta, según la calibración
+  const span = cal.abierta - cal.cerrada;
+  return span ? Math.max(0, Math.min(1, (servos.pin - cal.cerrada) / span)) : 0;
+}
 
 function rr(ctx, x, y, w, h, r) {                // rectángulo redondeado (sin depender de ctx.roundRect)
   ctx.beginPath();
@@ -981,6 +1004,22 @@ $("btnCoords").onclick = () => {
   drawAll();
 };
 $("btnCoords").classList.toggle("on", showCoords);
+
+// ---------- pinza: abrir / cerrar con la calibración, y calibrar ----------
+function mostrarCal() {
+  $("calInfo").textContent = `Abierta = ${cal.abierta} · cerrada = ${cal.cerrada} (guardado en el robot)`;
+  $("calRaw").textContent = servos.pin + "°";
+}
+$("btnAbrir").onclick = () => enqueue(`sp${cal.abierta}`, "servo");
+$("btnCerrar").onclick = () => enqueue(`sp${cal.cerrada}`, "servo");
+document.querySelectorAll("[data-nudge]").forEach(b => b.onclick = () => {
+  const v = Math.max(0, Math.min(180, servos.pin + +b.dataset.nudge));
+  servos.pin = v; $("calRaw").textContent = v + "°"; syncSlider("sPin", "vPin", v); drawAll();
+  enqueueKey(`sp${v}`, "servo", "pinza");   // si picas rápido, solo va el último
+});
+$("btnGuardarA").onclick = () => enqueue("ka", "cal");
+$("btnGuardarC").onclick = () => enqueue("kc", "cal");
+$("btnCalFab").onclick = () => { if (confirm("¿Regresar la pinza a abierta = 0 y cerrada = 150?")) enqueue("kr", "cal"); };
 ponerModo(["pinza", "prox", "dist"].includes(modo) ? modo : "pinza");
 window.addEventListener("resize", drawAll);
 drawAll();
