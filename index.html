@@ -46,6 +46,15 @@
   .banner.show { display: block; }
   .banner.warn { background: #3a2f10; color: var(--warn); border: 1px solid #6b5517; }
   .banner.err { background: #3a1416; color: #ff8a8c; border: 1px solid #6b2427; }
+  .banner.ok { position: fixed; left: 12px; right: 12px; z-index: 11; margin: 0; text-align: center;
+    bottom: calc(86px + env(safe-area-inset-bottom)); padding: 14px 12px;
+    background: #143a26; color: #7fe0a9; border: 1px solid #2c6b48; font-size: 17px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+  .calVals { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
+  .calVals div { background: #0d1014; border: 1px solid var(--line); border-radius: 12px; padding: 10px; text-align: center; }
+  .calVals small { display: block; color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+  .calVals b { font-size: 26px; }
+  .calVals div.flash { border-color: var(--ok); background: #143a26; transition: background .2s; }
   label.field { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   input[type=number], input[type=text] { width: 100%; font: inherit; font-size: 17px; color: var(--text);
     background: #0d1014; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
@@ -93,6 +102,7 @@
 <div id="noBle" class="banner err">Este navegador no tiene Bluetooth. En iPhone abre esta página con la app <b>Bluefy</b>.</div>
 <div id="homeWarn" class="banner warn">SIN CALIBRAR — pulsa HOME antes de mover el brazo.</div>
 <div id="errBanner" class="banner err"></div>
+<div id="okBanner" class="banner ok"></div>
 
 <div class="card">
   <div class="row">
@@ -186,6 +196,11 @@
   <div class="chips" style="grid-template-columns:repeat(4,1fr)">
     <button data-nudge="-10">−10</button><button data-nudge="-1">−1</button>
     <button data-nudge="1">+1</button><button data-nudge="10">+10</button>
+  </div>
+  <p class="hint" style="margin:10px 2px 0">Guardado en el robot:</p>
+  <div class="calVals">
+    <div id="calBoxA"><small>ABIERTA</small><b id="calA">—</b></div>
+    <div id="calBoxC"><small>CERRADA</small><b id="calC">—</b></div>
   </div>
   <div class="row" style="margin-top:8px">
     <button class="primary" id="btnGuardarA">GUARDAR ABIERTA</button>
@@ -391,7 +406,16 @@ function onLine(line) {
   m = line.match(/^Muneca en (\d+)/); if (m) { servos.mun = +m[1]; drawAll(); }
   m = line.match(/^Pinza en (\d+)/); if (m) { servos.pin = +m[1]; syncSlider("sPin", "vPin", +m[1]); drawAll(); }
   m = line.match(/Pinza cal: abierta=(\d+) cerrada=(\d+)/);
-  if (m) { cal.abierta = +m[1]; cal.cerrada = +m[2]; mostrarCal(); drawAll(); }
+  if (m) {
+    cal.abierta = +m[1]; cal.cerrada = +m[2];
+    // ¿esta línea es la respuesta a un "guardar"? entonces avisa claro qué se guardó
+    const guardo = current && current.kind === "cal" ? current.cmd.slice(0, 2) : null;
+    mostrarCal(guardo);
+    if (guardo === "ka") showOk(`✓ Guardado en el robot: pinza ABIERTA = ${cal.abierta}°`);
+    else if (guardo === "kc") showOk(`✓ Guardado en el robot: pinza CERRADA = ${cal.cerrada}°`);
+    else if (guardo === "kr") showOk(`✓ Valores de fábrica: abierta = ${cal.abierta}°, cerrada = ${cal.cerrada}°`);
+    drawAll();
+  }
   m = line.match(/X: \S+, pos=-?\d+ \((homeado|sin homear)\)\s+Y: \S+, pos=-?\d+ \((homeado|sin homear)\)\s+Z: \S+, pos=-?\d+ \((homeado|sin homear)\)/);
   if (m) { homed = m[1] === "homeado" && m[2] === "homeado" && m[3] === "homeado"; refreshUi(); }
 
@@ -1023,9 +1047,19 @@ $("btnCoords").onclick = () => {
 $("btnCoords").classList.toggle("on", showCoords);
 
 // ---------- pinza: abrir / cerrar con la calibración, y calibrar ----------
-function mostrarCal() {
-  $("calInfo").textContent = `Abierta = ${cal.abierta} · cerrada = ${cal.cerrada} (guardado en el robot)`;
+function mostrarCal(guardo) {
+  $("calInfo").textContent = `Abierta = ${cal.abierta}° · cerrada = ${cal.cerrada}° (guardado en el robot)`;
   $("calRaw").textContent = servos.pin + "°";
+  $("calA").textContent = cal.abierta + "°";
+  $("calC").textContent = cal.cerrada + "°";
+  // resalta en verde el valor que se acaba de guardar
+  const cajas = guardo === "ka" ? ["calBoxA"] : guardo === "kc" ? ["calBoxC"] : guardo === "kr" ? ["calBoxA", "calBoxC"] : [];
+  cajas.forEach(id => { $(id).classList.add("flash"); setTimeout(() => $(id).classList.remove("flash"), 2500); });
+}
+function showOk(text) {
+  const b = $("okBanner");
+  b.textContent = text; b.classList.add("show");
+  clearTimeout(showOk.t); showOk.t = setTimeout(() => b.classList.remove("show"), 5000);
 }
 $("btnAbrir").onclick = () => enqueue(`sp${cal.abierta}`, "servo");
 $("btnCerrar").onclick = () => enqueue(`sp${cal.cerrada}`, "servo");
