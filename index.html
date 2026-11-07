@@ -217,7 +217,7 @@
 const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";   // teléfono -> ESP32
 const TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";   // ESP32 -> teléfono
-const TIMEOUT_S = { home: 150, move: 60, servo: 5, query: 5, other: 30 };
+const TIMEOUT_S = { home: 150, move: 60, servo: 5, query: 5, cal: 5, other: 30 };
 
 let device = null, rxChar = null, buffer = "";
 let queue = [], current = null, timer = null;
@@ -246,7 +246,8 @@ function showError(text) {
 function refreshUi() {
   const pill = $("pill");
   pill.className = "pill" + (connected ? (current ? " busy" : " on") : "");
-  $("pillText").textContent = !connected ? "Desconectado" : current ? "Moviendo…" : homed ? "Listo" : "Conectado";
+  const moviendo = current && (current.kind === "move" || current.kind === "home");
+  $("pillText").textContent = !connected ? "Desconectado" : current ? (moviendo ? "Moviendo…" : "Esperando…") : homed ? "Listo" : "Conectado";
   $("btnConnect").textContent = connected ? "DESCONECTAR" : "CONECTAR";
   $("btnHome").disabled = !connected;
   $("homeWarn").classList.toggle("show", connected && !homed);
@@ -325,7 +326,13 @@ function dispatch() {
   if (current || !queue.length) return;
   current = queue.shift();
   log("tx", current.cmd);
-  writeRaw(current.cmd).catch(e => log("er", "Error al enviar: " + e.message));
+  const enviado = current;
+  writeRaw(current.cmd).catch(e => {
+    // No llegó al robot: no tiene caso esperar su respuesta.
+    log("er", `No se pudo enviar "${enviado.cmd}": ${e.message}`);
+    if (device && !device.gatt.connected) { onDisconnected(); return; }   // se cayó el Bluetooth
+    if (current === enviado) finish(false);
+  });
   timer = setTimeout(() => { log("er", `Sin respuesta a "${current.cmd}"`); finish(false); },
                      (TIMEOUT_S[current.kind] || 30) * 1000);
   refreshUi();
@@ -344,6 +351,7 @@ function clearQueue() { clearTimeout(timer); queue = []; current = null; ghost =
 // ¿Esta línea cierra el comando en curso? (mismas reglas que la interfaz de la compu)
 function closes(kind, line) {
   if (line.includes("PARO DE EMERGENCIA")) return false;
+  if (line.startsWith("Comando no valido")) return false;   // el robot no conoce ese comando
   if (kind === "home") {
     if (line === "HOME COMPLETO") return true;
     if (line === "HOME INCOMPLETO" || line.startsWith("ERROR")) return false;
@@ -402,6 +410,15 @@ function syncSlider(id, labelId, value) {
 function fmt(v) { return (+v).toFixed(1).replace(/\.0$/, ""); }
 
 $("btnConnect").onclick = () => connected ? disconnect() : connect();
+// Salida de emergencia: si la app se queda esperando una respuesta que no llega, tocar el
+// letrero de estado deja de esperarla (no detiene el robot: para eso está PARO).
+$("pill").onclick = () => {
+  if (!current) return;
+  if (!confirm(`¿Dejar de esperar la respuesta de "${current.cmd}"?\n(Esto NO detiene el robot; para eso usa PARO.)`)) return;
+  log("er", `Se dejó de esperar "${current.cmd}"`);
+  clearTimeout(timer); queue = []; current = null; ghost = null; drawAll();
+  refreshUi();
+};
 $("btnHome").onclick = () => { homed = false; refreshUi(); enqueue("h", "home"); };
 $("stop").onclick = () => {
   // El paro no espera la cola: sale al instante, aunque el robot se esté moviendo.
